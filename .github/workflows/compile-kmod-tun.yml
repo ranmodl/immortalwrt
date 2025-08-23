@@ -2,10 +2,6 @@ name: Compile kmod-tun for Redmi AX3000
 
 on:
   workflow_dispatch:  # 允许手动触发
-  push:
-    branches: [ main ]
-    paths:
-      - '.github/workflows/compile-kmod-tun.yml'  # 只有这个文件变化时才触发
 
 jobs:
   compile:
@@ -29,23 +25,30 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
+    - name: Find correct package name
+      run: |
+        # 搜索包含 tun 的内核模块包
+        find . -name "*.mk" -exec grep -l "tun" {} \; | head -10
+        echo "=== 搜索可能的包名 ==="
+        ./scripts/feeds list | grep -i tun
+        ./scripts/feeds list | grep -i kernel
+        ls -la package/kernel/ | grep -i tun || true
+
     - name: Configure for Redmi AX3000
       run: |
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-tun=m" >> .config
+        # 先不指定具体包，让 defconfig 来处理
         make defconfig
 
-    - name: Compile kmod-tun only
+    - name: Search for tun in config
       run: |
-        make package/kmod-tun/compile -j$(nproc) V=s
+        # 查看配置中与 tun 相关的选项
+        grep -i tun .config || true
+        make menuconfig 2>/dev/null || true
 
-    - name: Find and upload kmod-tun package
-      uses: actions/upload-artifact@v4
-      with:
-        name: kmod-tun-package
-        path: |
-          bin/targets/qualcommax/ipq50xx/packages/kmod-tun*.ipk
-          bin/packages/arm_cortex-a7/kernel/kmod-tun*.ipk
-        if-no-files-found: error
+    - name: Try to compile kernel modules
+      run: |
+        # 尝试编译所有内核模块相关的包
+        make package/kernel/linux/compile -j$(nproc) V=s
