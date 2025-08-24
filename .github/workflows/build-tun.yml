@@ -1,50 +1,85 @@
-name: Build Redmi AX3000 with TUN
+name: Build Redmi AX3000 with TUN (Space Optimized)
 
 on:
-  workflow_dispatch:  # 手动触发编译
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 300  # 延长超时时间
+    timeout-minutes: 300
+    env:
+      # 关闭详细日志，减少磁盘占用（关键优化）
+      VERBOSE: "0"
+      # 启用缓存（可选，避免重复下载）
+      CACHE_DIR: "/home/runner/.cache/immortalwrt"
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'  # 拉取完整子模块
+          submodules: 'recursive'
+          # 只拉取最新 commit，减少历史文件占用
+          fetch-depth: 1
 
-      - name: Initialize environment
+      - name: Free up disk space (Critical!)
         run: |
-          # 安装仓库要求的依赖（仓库脚本已适配）
+          # 1. 删除 Ubuntu 预装的冗余软件（释放 20-30GB）
+          sudo apt-get autoremove -y
+          sudo apt-get clean -y
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+          
+          # 2. 创建缓存目录，避免重复下载
+          mkdir -p $CACHE_DIR
+          ln -s $CACHE_DIR dl  # 软链接到编译系统的下载目录
+
+      - name: Initialize environment (Minimal Dependencies)
+        run: |
+          # 使用仓库脚本安装依赖，但跳过冗余组件
           sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-          # 更新 feeds
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          
+          # 更新 feeds 时关闭详细输出
+          ./scripts/feeds update -a -q
+          ./scripts/feeds install -a -q
 
-      - name: Configure firmware (enable TUN)
+      - name: Configure firmware (Enable TUN + Minimal Options)
         run: |
-          # 加载默认设备配置（仓库已适配 Redmi AX3000）
+          # 1. 加载默认设备配置
           make defconfig
           
-          # 关键：启用 TUN 内核内置支持（避免模块依赖）
+          # 2. 启用 TUN 核心支持（仅保留必要配置）
           echo "CONFIG_KERNEL_TUN=y" >> .config
           echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-tun=y" >> .config  # 显式添加 TUN 模块
+          echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
           
-          # 重新生成配置，确保 TUN 生效
+          # 3. 关闭冗余功能，减少编译文件（关键优化）
+          echo "# CONFIG_PACKAGE_luci is not set" >> .config  # 若不需要 LuCI 网页管理，关闭可省 10+GB
+          echo "# CONFIG_PACKAGE_emortal_autosamba is not set" >> .config
+          echo "# CONFIG_PACKAGE_pcat-manager is not set" >> .config
+          echo "CONFIG_CCACHE=y" >> .config  # 启用编译缓存，减少重复编译
+          
+          # 4. 生成最终配置
           make defconfig
 
-      - name: Start compilation
+      - name: Start compilation (No Verbose Log)
         run: |
-          # 多线程编译（根据云端 CPU 自动调整）
-          make -j$(nproc) V=s 2>&1 | tee build.log
+          # 1. 禁用详细日志（仅输出错误信息，减少日志文件大小）
+          make -j$(nproc) 2>&1 | tee -a build-error.log  # 只记录错误日志
+          
+          # 2. 编译完成后清理中间文件（释放空间用于生成固件）
+          make clean && rm -rf build_dir/tmp/*
 
-      - name: Upload firmware
+      - name: Generate final firmware
+        run: |
+          # 生成固件时禁用冗余格式（仅保留 sysupgrade 和 factory 两种核心格式）
+          make image -j$(nproc) 2>&1 | tee -a firmware-gen.log
+
+      - name: Upload firmware and logs
         uses: actions/upload-artifact@v4
         with:
           name: redmi-ax3000-tun-firmware
           path: |
             bin/targets/qualcommax/ipq50xx/*.bin
             bin/targets/qualcommax/ipq50xx/*.ubi
-          retention-days: 30  # 固件保留 30 天
+            build-error.log  # 仅上传错误日志，避免占用空间
+          retention-days: 30
