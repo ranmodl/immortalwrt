@@ -1,109 +1,201 @@
-name: Build TUN support for Redmi AX3000
+name: Build Redmi AX3000 with TUN Support
 
 on:
   workflow_dispatch:
+    inputs:
+      device_model:
+        description: 'Device model (leave default for Redmi AX3000)'
+        required: true
+        default: 'xiaomi_redmi-ax3000'
+      kernel_version:
+        description: 'Kernel version'
+        required: true
+        default: '6.6'
 
 jobs:
-  build:
+  build-firmware:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
+    environment: build
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        repository: immortalwrt/immortalwrt
-        ref: openwrt-24.10
-        submodules: true
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          repository: immortalwrt/immortalwrt
+          ref: openwrt-24.10
+          submodules: 'recursive'
+          fetch-depth: 1
 
-    - name: Setup build environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential clang flex bison g++ gawk \
-        gettext git libncurses5-dev libssl-dev python3 python3-dev \
-        rsync unzip zlib1g-dev file wget
+      - name: Initial environment setup
+        run: |
+          # Install required dependencies
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gettext git \
+            libncurses5-dev libssl-dev python3 python3-dev rsync \
+            unzip zlib1g-dev file wget curl nano tree
 
-    - name: Configure device and TUN (fixed)
-      run: |
-        # 1. 清除旧配置（避免残留冲突）
-        rm -f .config
-        
-        # 2. 设备配置（使用ImmortalWrt官方Redmi AX3000定义）
-        # 确认设备配置项正确（参考官方设备定义）
-        echo "CONFIG_TARGET_qualcommax=y" > .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_xiaomi_redmi-ax3000=y" >> .config  # 修正设备名称
-        
-        # 3. 强制清理并设置TUN核心配置（解决重复问题）
-        # 先删除所有TUN相关配置，再重新写入
-        sed -i '/CONFIG_TUN/d' target/linux/generic/config-6.6
-        sed -i '/CONFIG_TUN_VNET_CROSS_LE/d' target/linux/generic/config-6.6
-        echo "CONFIG_TUN=y" >> target/linux/generic/config-6.6
-        echo "CONFIG_TUN_VNET_CROSS_LE=y" >> target/linux/generic/config-6.6
-        
-        # 4. 在.config中强制声明TUN（确保被编译系统读取）
-        echo "CONFIG_KERNEL_TUN=y" >> .config
-        echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
-        
-        # 5. 添加基础依赖（解决缺失警告）
-        echo "CONFIG_PACKAGE_luci=y" >> .config  # 基础LuCI（可选，解决依赖警告）
-        echo "CONFIG_PACKAGE_libpam=y" >> .config
-        echo "CONFIG_PACKAGE_lm-sensors=y" >> .config
-        
-        # 6. 生成配置（保留手动设置）
-        make defconfig
-        # 再次追加确保配置不被覆盖
-        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_xiaomi_redmi-ax3000=y" >> .config
-        echo "CONFIG_KERNEL_TUN=y" >> .config
-        make defconfig  # 二次生成确保生效
+          # Configure build settings
+          echo "DEVICE_MODEL=${{ github.event.inputs.device_model }}" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=${{ github.event.inputs.kernel_version }}" >> $GITHUB_ENV
+          echo "TARGET_DIR=target/linux/qualcommax/ipq50xx" >> $GITHUB_ENV
 
-    - name: Verify critical configurations (fixed)
-      run: |
-        echo "=== 验证设备型号配置 ==="
-        grep "xiaomi_redmi-ax3000" .config || echo "错误：设备型号配置仍未生效！"
-        
-        echo -e "\n=== 验证TUN配置 ==="
-        grep "CONFIG_TUN=y" target/linux/generic/config-6.6 || echo "错误：通用配置TUN未启用！"
-        grep "CONFIG_TUN_VNET_CROSS_LE=y" target/linux/generic/config-6.6 || echo "错误：通用配置TUN辅助参数缺失！"
-        grep "CONFIG_KERNEL_TUN=y" .config || echo "错误：.config中TUN未启用！"
-        
-        echo -e "\n=== 显示关键配置片段 ==="
-        cat .config | grep -E "TARGET|TUN" | head -30
+      - name: Load official device configuration
+        run: |
+          # Load base configuration for qualcommax ipq50xx
+          echo "Loading official Qualcommax IPQ50xx configuration"
+          make defconfig TARGET=qualcommax SUBTARGET=ipq50xx
 
-    - name: Build toolchain
-      run: |
-        echo "=== 编译工具链 ==="
-        make toolchain/install -j$(nproc) V=s 2>&1 | tail -100
+          # Verify base configuration loaded
+          if ! grep -q "CONFIG_TARGET_qualcommax_ipq50xx=y" .config; then
+            echo "Error: Failed to load base IPQ50xx configuration"
+            exit 1
+          fi
 
-    - name: Build kernel with TUN
-      run: |
-        echo "=== 编译内核 ==="
-        make target/compile -j$(nproc) V=s 2>&1 | tail -100
+      - name: Configure specific device and TUN
+        run: |
+          # Set specific device model
+          echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_${{ env.DEVICE_MODEL }}=y" >> .config
 
-    - name: Build packages
-      run: |
-        echo "=== 编译软件包 ==="
-        make package/compile -j$(nproc) V=s 2>&1 | tail -100
+          # Configure TUN support at multiple levels
+          echo "Configuring TUN support"
+          
+          # 1. Kernel level configuration
+          echo "CONFIG_KERNEL_TUN=y" >> .config
+          echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
+          
+          # 2. Modify generic kernel config to ensure TUN is enabled
+          sed -i '/^#*CONFIG_TUN/d' target/linux/generic/config-${{ env.KERNEL_VERSION }}
+          sed -i '/^#*CONFIG_TUN_VNET_CROSS_LE/d' target/linux/generic/config-${{ env.KERNEL_VERSION }}
+          echo "CONFIG_TUN=y" >> target/linux/generic/config-${{ env.KERNEL_VERSION }}
+          echo "CONFIG_TUN_VNET_CROSS_LE=y" >> target/linux/generic/config-${{ env.KERNEL_VERSION }}
+          
+          # 3. Add TUN related packages
+          echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
+          echo "CONFIG_PACKAGE_ip-tunnel=y" >> .config
 
-    - name: Install target filesystem
-      run: |
-        echo "=== 安装目标文件系统 ==="
-        make target/install -j$(nproc) V=s 2>&1 | tail -100
+          # Resolve dependency warnings
+          echo "CONFIG_PACKAGE_libpam=y" >> .config
+          echo "CONFIG_PACKAGE_lm-sensors=y" >> .config
+          echo "CONFIG_PACKAGE_liblzma=y" >> .config
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-base=y" >> .config
 
-    - name: Generate firmware image
-      run: |
-        echo "=== 生成固件 ==="
-        make image -j$(nproc) V=s 2>&1 | tail -200
+          # Finalize configuration
+          make defconfig
 
-    - name: Locate firmware
-      run: |
-        echo "=== 查找固件 ==="
-        find bin/targets/ -name "*redmi-ax3000*.bin"
-        find bin/targets/ -name "*ipq50xx*.bin"
+          # Lock critical configurations
+          echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_${{ env.DEVICE_MODEL }}=y" >> .config
+          echo "CONFIG_KERNEL_TUN=y" >> .config
+          make defconfig
 
-    - name: Upload firmware
-      uses: actions/upload-artifact@v4
-      with:
-        name: redmi-ax3000-tun-firmware
-        path: bin/targets/**/*.bin
-        if-no-files-found: error
+      - name: Critical configuration verification
+        run: |
+          echo "=== Verifying Device Configuration ==="
+          if grep -q "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_${{ env.DEVICE_MODEL }}=y" .config; then
+            echo "✅ Device configuration verified"
+          else
+            echo "❌ Device configuration missing in .config"
+            echo "Available devices in target:"
+            grep "DEVICE_" ${{ env.TARGET_DIR }}/image/Makefile
+            exit 1
+          fi
+
+          echo -e "\n=== Verifying TUN Configuration ==="
+          if grep -q "CONFIG_KERNEL_TUN=y" .config && grep -q "CONFIG_TUN=y" target/linux/generic/config-${{ env.KERNEL_VERSION }}; then
+            echo "✅ TUN configuration verified"
+          else
+            echo "❌ TUN configuration missing"
+            exit 1
+          fi
+
+          echo -e "\n=== Configuration Summary ==="
+          grep -E "TARGET|TUN|DEVICE" .config | sort | uniq
+
+      - name: Build toolchain
+        run: |
+          echo "=== Building toolchain ==="
+          make toolchain/install -j$(nproc) V=s 2>&1 | tee toolchain-build.log
+
+      - name: Build kernel
+        run: |
+          echo "=== Building kernel ==="
+          make target/compile -j$(nproc) V=s 2>&1 | tee kernel-build.log
+          
+          # Verify TUN in kernel configuration
+          KERNEL_CONFIG=$(find build_dir/ -path "*/linux-*${{ env.KERNEL_VERSION }}*/.config" | head -1)
+          if [ -f "$KERNEL_CONFIG" ]; then
+            echo -e "\nVerifying TUN in kernel config: $KERNEL_CONFIG"
+            if grep -q "CONFIG_TUN=y" "$KERNEL_CONFIG"; then
+              echo "✅ TUN enabled in kernel configuration"
+            else
+              echo "❌ TUN missing in kernel configuration"
+              exit 1
+            fi
+          else
+            echo "❌ Kernel configuration file not found"
+            exit 1
+          fi
+
+      - name: Build packages
+        run: |
+          echo "=== Building packages ==="
+          make package/compile -j$(nproc) V=s 2>&1 | tee package-build.log
+
+      - name: Install target filesystem
+        run: |
+          echo "=== Installing target filesystem ==="
+          make target/install -j$(nproc) V=s 2>&1 | tee filesystem-install.log
+
+      - name: Generate firmware images
+        run: |
+          echo "=== Generating firmware images ==="
+          make image -j$(nproc) V=s 2>&1 | tee firmware-generate.log
+          
+          # Locate and verify firmware
+          FIRMWARE_DIR="bin/targets/qualcommax/ipq50xx"
+          echo -e "\nChecking firmware directory: $FIRMWARE_DIR"
+          
+          if [ -d "$FIRMWARE_DIR" ]; then
+            ls -l "$FIRMWARE_DIR"
+            FIRMWARE_FILE=$(find "$FIRMWARE_DIR" -name "*${{ env.DEVICE_MODEL }}*.bin" | grep -v "factory" | head -1)
+            
+            if [ -n "$FIRMWARE_FILE" ]; then
+              echo -e "\n✅ Found firmware file: $FIRMWARE_FILE"
+              echo "FIRMWARE_FILE=$FIRMWARE_FILE" >> $GITHUB_ENV
+              file "$FIRMWARE_FILE"
+            else
+              echo "❌ No sysupgrade firmware found for ${{ env.DEVICE_MODEL }}"
+              exit 1
+            fi
+          else
+            echo "❌ Firmware directory $FIRMWARE_DIR not found"
+            exit 1
+          fi
+
+      - name: Verify TUN in final firmware
+        run: |
+          echo "=== Verifying TUN in final firmware ==="
+          # Extract kernel from firmware to verify TUN presence
+          mkdir -p firmware_extract
+          cd firmware_extract
+          dd if="${{ env.FIRMWARE_FILE }}" of=kernel.bin bs=1 count=4194304 status=none
+          
+          if strings kernel.bin | grep -q "tun"; then
+            echo "✅ TUN functionality detected in firmware"
+          else
+            echo "❌ TUN functionality not found in firmware"
+            exit 1
+          fi
+          cd ..
+
+      - name: Upload firmware and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmi-ax3000-firmware-with-tun
+          path: |
+            ${{ env.FIRMWARE_FILE }}
+            *.log
+            bin/targets/qualcommax/ipq50xx/*.bin
+          retention-days: 30
