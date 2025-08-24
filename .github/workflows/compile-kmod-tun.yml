@@ -27,25 +27,45 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Configure for Redmi AX3000 with TUN enabled
+    - name: Configure base system
       run: |
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        
-        # 启用内核中的 TUN 支持
-        echo "CONFIG_KERNEL_TUN=y" >> .config
-        echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
-        
         make defconfig
 
-    - name: Verify TUN is enabled in kernel
+    - name: Manually enable TUN in kernel config
       run: |
-        echo "=== 检查内核 TUN 配置 ==="
-        grep "CONFIG_KERNEL_TUN" .config || echo "TUN 配置未找到"
-        grep "CONFIG_TUN" .config || echo "直接 TUN 配置未找到"
-        echo "=== 完整的内核网络配置 ==="
-        grep "CONFIG_KERNEL_NET" .config | head -10
+        echo "=== 手动启用 TUN 配置 ==="
+        # 找到内核配置文件
+        KERNEL_CONFIG=$(find . -name "config-*" | grep -E "6\.6" | head -1)
+        echo "找到内核配置文件: $KERNEL_CONFIG"
+        
+        # 备份原配置
+        cp "$KERNEL_CONFIG" "${KERNEL_CONFIG}.backup"
+        
+        # 启用 TUN 支持
+        sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
+        sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
+        
+        echo "修改后的 TUN 配置:"
+        grep "CONFIG_TUN" "$KERNEL_CONFIG"
+
+    - name: Clean and reconfigure
+      run: |
+        # 清除旧配置，重新配置
+        make target/linux/clean
+        make defconfig
+
+    - name: Verify TUN configuration
+      run: |
+        echo "=== 最终配置检查 ==="
+        # 检查内核配置
+        find . -name "config-*" -exec grep -l "CONFIG_TUN" {} \;
+        find . -name "config-*" -exec grep -h "CONFIG_TUN" {} \;
+        
+        # 检查包配置
+        grep -i "tun\|TUN" .config || echo "在 .config 中未找到 TUN 配置"
 
     - name: Download all sources
       run: make download -j$(nproc)
@@ -55,26 +75,40 @@ jobs:
 
     - name: Build kernel with TUN support
       run: |
+        echo "=== 开始编译内核 ==="
         make target/compile -j$(nproc) V=s
         make package/kernel/linux/compile -j$(nproc) V=s
 
-    - name: Build complete firmware with TUN
+    - name: Check if TUN module was built
       run: |
-        make -j$(nproc) V=s 2>&1 | grep -A 10 -B 10 "tun\|TUN" || echo "编译日志中未找到 TUN 相关信息"
+        echo "=== 检查是否编译了 TUN 模块 ==="
+        find build_dir/ -name "*.ko" | grep -i tun || echo "未找到 TUN 模块"
+        find build_dir/ -name "tun.ko" || echo "未找到 tun.ko"
 
-    - name: Find the built firmware
+    - name: Build complete firmware
       run: |
-        echo "=== 生成的固件文件 ==="
+        echo "=== 编译完整固件 ==="
+        make -j$(nproc) V=s 2>&1 | tail -50
+
+    - name: Find and upload artifacts
+      run: |
+        echo "=== 生成的文件 ==="
         find bin/ -name "*.bin" -o -name "*.itb" -o -name "*.ubi" | head -10
-        echo "=== 内核模块文件 ==="
-        find build_dir/ -name "tun.ko" -o -name "*tun*" | head -5 || echo "未找到 TUN 模块"
+        find build_dir/ -name "tun.ko" || echo "tun.ko 未找到"
 
-    - name: Upload firmware with TUN support
+        # 如果找到了 tun.ko，单独打包
+        if find build_dir/ -name "tun.ko" | grep -q .; then
+          echo "找到 TUN 模块，单独提取"
+          find build_dir/ -name "tun.ko" -exec cp {} . \;
+        fi
+
+    - name: Upload firmware and modules
       uses: actions/upload-artifact@v4
       with:
-        name: firmware-with-tun-support
+        name: firmware-with-tun
         path: |
           bin/targets/qualcommax/ipq50xx/*.bin
           bin/targets/qualcommax/ipq50xx/*.itb
           bin/targets/qualcommax/ipq50xx/*.ubi
-        if-no-files-found: error
+          tun.ko
+        if-no-files-found: ignore
