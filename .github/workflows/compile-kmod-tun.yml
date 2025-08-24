@@ -1,12 +1,12 @@
-name: Build TUN support for Redmi AX3000
+name: Diagnose Build Issue
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
     - name: Checkout repository
@@ -16,45 +16,48 @@ jobs:
         ref: openwrt-24.10
         submodules: true
 
-    - name: Setup build environment
+    - name: Setup environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential clang flex bison g++ gawk \
-        gettext git libncurses5-dev libssl-dev python3 python3-dev \
-        rsync unzip zlib1g-dev file wget
+        sudo apt-get install -y build-essential git libncurses5-dev
 
-    - name: Configure for device
+    - name: Check directory structure
       run: |
-        echo "CONFIG_TARGET_qualcommax=y" > .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        echo "CONFIG_KERNEL_TUN=y" >> .config
-        make defconfig
+        echo "=== 仓库结构 ==="
+        ls -la
+        echo "=== 目标目录结构 ==="
+        find . -name "target" -type d | head -3
+        find . -name "qualcommax" -type d | head -3
+        echo "=== 配置文件 ==="
+        find . -name "*.mk" -path "*/qualcommax/*" | head -5
 
-    - name: Build firmware
+    - name: Find device configuration
       run: |
-        echo "=== 开始编译固件 ==="
-        make -j$(nproc) V=s 2>&1 | tail -50
+        echo "=== 查找设备配置 ==="
+        # 搜索 Redmi AX3000 配置
+        find . -name "*.mk" -exec grep -l "redmi.*ax3000\|ax3000.*redmi" {} \; | head -5
+        echo ""
+        echo "=== 查看 Makefile ==="
+        cat target/linux/qualcommax/image/Makefile | grep -A 5 -B 5 "redmi\|ax3000" || true
 
-    - name: List generated files
+    - name: Try to configure
       run: |
-        echo "=== 生成的文件列表 ==="
-        find bin/ -name "*.bin" -o -name "*.itb" -o -name "*.ubi" | head -10
-        echo "=== 文件详情 ==="
-        ls -la bin/targets/qualcommax/ipq50xx/ || echo "目录不存在"
-        echo "=== 文件大小 ==="
-        du -h bin/targets/qualcommax/ipq50xx/*.bin 2>/dev/null || echo "未找到bin文件"
+        echo "=== 尝试配置 ==="
+        # 查看可用的配置
+        make help | grep "config" || true
+        echo ""
+        echo "=== 尝试列出配置 ==="
+        make menuconfig 2>/dev/null || echo "menuconfig 不可用"
+        echo ""
+        echo "=== 直接查看配置选项 ==="
+        find . -name "Config.in" -exec grep -l "qualcommax" {} \; | head -3
 
-    - name: Upload firmware artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: redmi-ax3000-firmware
-        path: bin/targets/qualcommax/ipq50xx/*.bin
-        if-no-files-found: error
-
-    - name: Upload all artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: all-build-files
-        path: bin/targets/qualcommax/ipq50xx/
-        if-no-files-found: warn
+    - name: Build test
+      run: |
+        echo "=== 测试编译 ==="
+        # 尝试一个简单的编译测试
+        make tools/install || echo "工具编译失败"
+        make toolchain/install || echo "工具链编译失败"
+        
+        echo "=== 检查编译环境 ==="
+        ls -la staging_dir/ 2>/dev/null | head -3 || echo "staging_dir 不存在"
