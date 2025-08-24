@@ -31,37 +31,48 @@ jobs:
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        
-        # 启用 TUN 支持！
         echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
-        echo "CONFIG_KERNEL_TUN=y" >> .config
-        
         make defconfig
 
     - name: Verify TUN configuration
       run: |
-        echo "=== 检查 TUN 配置是否已启用 ==="
+        echo "=== 检查 TUN 配置 ==="
         grep "CONFIG_PACKAGE_kmod-tun" .config
-        grep "CONFIG_KERNEL_TUN" .config
+        echo "=== 完整配置检查 ==="
+        grep -i "tun\|TUN" .config || true
 
-    - name: Build toolchain first
+    - name: Download all sources first
       run: |
-        make toolchain/install -j$(nproc)
+        make download -j$(nproc)
 
-    - name: Build target
+    - name: Build toolchain
       run: |
-        make target/compile -j$(nproc)
+        make toolchain/install -j$(nproc) V=s
 
-    - name: Build kmod-tun package
+    - name: Build target and kernel
       run: |
-        make package/kmod-tun/compile -j$(nproc) V=s
+        make target/compile -j$(nproc) V=s
+        make package/kernel/linux/compile -j$(nproc) V=s
 
-    - name: Find and upload kmod-tun package
-      uses: actions/upload-artifact@v4
-      with:
-        name: kmod-tun-package
-        path: |
-          bin/targets/qualcommax/ipq50xx/packages/kmod-tun*.ipk
-          bin/packages/arm_cortex-a7/kernel/kmod-tun*.ipk
-          build_dir/target-*/kmod-tun-*/ipkg-*/kmod-tun*.ipk
-        if-no-files-found: warn
+    - name: Try to find kmod-tun package location
+      run: |
+        echo "=== 查找 kmod-tun 包的位置 ==="
+        find . -name "*kmod-tun*" -type d | head -10 || true
+        find . -name "Makefile" -exec grep -l "kmod-tun" {} \; | head -5 || true
+        ls -la package/feeds/ || true
+        ls -la package/kernel/ || true
+
+    - name: Build kmod-tun with debug info
+      run: |
+        # 尝试不同的可能路径
+        make package/feeds/packages/kmod-tun/compile V=s 2>&1 | head -50 || \
+        make package/kernel/kmod-tun/compile V=s 2>&1 | head -50 || \
+        make package/feeds/base/kmod-tun/compile V=s 2>&1 | head -50 || \
+        echo "尝试直接编译所有包来寻找 kmod-tun"
+        make V=s 2>&1 | grep -A 10 -B 10 "kmod-tun" | head -30
+
+    - name: Search for any compiled packages
+      run: |
+        echo "=== 搜索所有已编译的包 ==="
+        find . -name "*.ipk" | head -20
+        find . -name "*tun*" -type f | head -10
