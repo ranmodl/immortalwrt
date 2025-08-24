@@ -27,13 +27,6 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Configure base system
-      run: |
-        echo "CONFIG_TARGET_qualcommax=y" > .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        make defconfig
-
     - name: Modify the generic kernel config
       run: |
         echo "=== 修改通用内核配置文件 ==="
@@ -57,14 +50,19 @@ jobs:
         echo "=== 修改后的配置 ==="
         grep "CONFIG_TUN" "$GENERIC_CONFIG"
 
-    - name: Force clean and reconfigure
+    - name: Create basic config
       run: |
-        # 彻底清理并重新配置
-        rm -f .config
-        make target/linux/clean
-        echo "CONFIG_TARGET_qualcommax=y" > .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
-        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
+        echo "=== 创建基本配置 ==="
+        # 直接创建配置，避免使用 menuconfig
+        cat > .config << 'EOF'
+CONFIG_TARGET_qualcommax=y
+CONFIG_TARGET_qualcommax_ipq50xx=y
+CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
+CONFIG_KERNEL_TUN=y
+CONFIG_KERNEL_TUN_VNET_CROSS_LE=y
+EOF
+        
+        # 运行 defconfig 来填充其他配置
         make defconfig
 
     - name: Verify configuration
@@ -76,42 +74,49 @@ jobs:
         echo "当前 .config 中的相关配置:"
         grep -i "tun\|TUN" .config || echo "在 .config 中未找到 TUN 配置"
 
-    - name: Download and build
+    - name: Download sources
       run: |
         make download -j$(nproc)
+
+    - name: Build toolchain
+      run: |
         make toolchain/install -j$(nproc) V=s
 
-    - name: Build kernel with TUN
+    - name: Build kernel
       run: |
-        echo "=== 编译包含 TUN 的内核 ==="
+        echo "=== 编译内核 ==="
         make target/compile -j$(nproc) V=s 2>&1 | tail -20
 
-    - name: Check for TUN module
+    - name: Check build progress
       run: |
-        echo "=== 检查 TUN 模块 ==="
-        find build_dir/ -name "*tun*" -type f | head -5 || echo "未找到 TUN 相关文件"
-        
-        # 查看内核构建目录
-        echo "内核构建目录:"
-        find build_dir/ -name "linux-*" -type d | head -3
+        echo "=== 检查编译进度 ==="
+        find build_dir/ -name "*.o" | head -3 || echo "未找到编译对象文件"
+        ls -la build_dir/ 2>/dev/null | head -3 || true
 
     - name: Complete the build
       run: |
         echo "=== 完成编译 ==="
-        make -j$(nproc) V=s 2>&1 | tail -15
+        # 只编译目标文件，不编译整个固件（节省时间）
+        make package/kernel/linux/compile -j$(nproc) V=s 2>&1 | tail -15
 
-    - name: Prepare artifacts
+    - name: Search for TUN module
       run: |
-        echo "=== 生成的文件 ==="
-        find bin/ -name "*.bin" -o -name "*.itb" -o -name "*.ubi" | head -5 || echo "未找到固件文件"
-        
-        # 特别查找 TUN 模块
-        find build_dir/ -name "tun.ko" || echo "未找到 tun.ko"
+        echo "=== 搜索 TUN 模块 ==="
+        # 在内核构建目录中查找
+        KERNEL_DIR=$(find build_dir/ -name "linux-*" -type d | head -1)
+        if [ -n "$KERNEL_DIR" ]; then
+            echo "内核目录: $KERNEL_DIR"
+            find "$KERNEL_DIR" -name "*tun*" -type f | head -10
+            find "$KERNEL_DIR" -name "tun.ko" || echo "未找到 tun.ko"
+        else
+            echo "未找到内核构建目录"
+            find build_dir/ -name "*tun*" | head -5
+        fi
 
-    - name: Upload results
+    - name: Upload any found modules
       uses: actions/upload-artifact@v4
       with:
-        name: redmi-ax3000-with-tun
+        name: tun-module-search-results
         path: |
-          bin/targets/qualcommax/ipq50xx/
-        if-no-files-found: warn
+          build_dir/
+        if-no-files-found: ignore
