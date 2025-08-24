@@ -1,4 +1,4 @@
-name: Enable TUN in Kernel for Redmi AX3000
+name: Compile Firmware for Redmi AX3000 with TUN
 
 on:
   workflow_dispatch:
@@ -12,39 +12,70 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        repository: ranmodl/immortalwrt
         submodules: true
 
     - name: Setup build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git libncurses5-dev libssl-dev python3-full python3-dev rsync unzip zlib1g-dev file wget zstd
+        sudo apt-get install -y build-essential clang flex bison g++ gawk \
+        gettext git libncurses5-dev libssl-dev python3-full python3-dev \
+        rsync unzip zlib1g-dev file wget zstd
 
     - name: Update and install feeds
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Modify kernel config for TUN
+    - name: Find correct device configuration
       run: |
-        echo "=== Modifying kernel configuration ==="
-        KERNEL_CONFIG="target/linux/generic/config-6.6"
-        
-        if [ -f "$KERNEL_CONFIG" ]; then
-            echo "Enabling TUN in kernel config"
-            sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
-            sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
-            echo "TUN configuration enabled"
-        else
-            echo "Kernel config file not found: $KERNEL_CONFIG"
-            find target/linux -name "config-*" | head -5
-        fi
+        echo "=== 查找 Redmi AX3000 设备配置 ==="
+        # 查找所有可能的设备配置
+        find target/linux/qualcommax -name "*.mk" | head -10
+        echo ""
+        echo "=== 搜索 redmi 或 ax3000 配置 ==="
+        find target/linux/qualcommax -name "*.mk" -exec grep -l "redmi\|ax3000\|xiaomi" {} \; | head -5
+        echo ""
+        echo "=== 查看设备配置文件内容 ==="
+        for file in $(find target/linux/qualcommax -name "*.mk" -exec grep -l "redmi\|ax3000\|xiaomi" {} \;); do
+          echo "文件: $file"
+          grep "DEVICE\|PROFILE" "$file" | head -3
+          echo ""
+        done
 
-    - name: Configure target
+    - name: Configure for Redmi AX3000
       run: |
+        echo "=== 配置 Redmi AX3000 ==="
+        # 基本架构配置
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
+        
+        # 尝试正确的设备标识符（根据上一步的结果调整）
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
+        
+        # 启用 TUN 支持
+        echo "CONFIG_KERNEL_TUN=y" >> .config
+        echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
+        
+        # 启用生成 factory 固件
+        echo "CONFIG_TARGET_IMAGES_INCLUDE_UBI=y" >> .config
+        echo "CONFIG_TARGET_UBIFS_FREE_SPACE_FIXUP=y" >> .config
+        
         make defconfig
+        
+        echo "=== 验证配置 ==="
+        grep "DEVICE\|redmi\|ax3000" .config || echo "未找到设备配置"
+        grep "TUN" .config || echo "未找到 TUN 配置"
+
+    - name: Modify kernel config
+      run: |
+        echo "=== 修改内核配置启用 TUN ==="
+        KERNEL_CONFIG="target/linux/generic/config-6.6"
+        if [ -f "$KERNEL_CONFIG" ]; then
+          sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
+          sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
+          echo "TUN 配置已启用"
+        fi
 
     - name: Download sources
       run: |
@@ -54,26 +85,23 @@ jobs:
       run: |
         make toolchain/install -j$(nproc) V=s
 
-    - name: Build kernel
+    - name: Build firmware
       run: |
-        echo "=== Building kernel ==="
-        make target/compile -j$(nproc) V=s 2>&1 | tail -20
+        echo "=== 开始编译固件 ==="
+        make -j$(nproc) V=s 2>&1 | tail -30
 
-    - name: Check for TUN module
+    - name: Verify build results
       run: |
-        echo "=== Checking for TUN module ==="
-        find build_dir/ -name "*tun*" | head -10 || echo "No TUN files found"
+        echo "=== 检查生成的文件 ==="
+        find bin/ -name "*redmi*" -o -name "*ax3000*" | head -10 || echo "未找到 Redmi AX3000 文件"
+        find bin/ -name "*.bin" -o -name "*.ubi" | head -10
+        echo ""
+        echo "=== 文件详情 ==="
+        ls -la bin/targets/qualcommax/ipq50xx/ || echo "目录不存在"
 
-    - name: Complete build
-      run: |
-        echo "=== Completing build ==="
-        make -j$(nproc) V=s 2>&1 | tail -15
-
-    - name: Upload artifacts
+    - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: firmware-with-tun
-        path: |
-          bin/targets/qualcommax/ipq50xx/*.bin
-          bin/targets/qualcommax/ipq50xx/*.itb
-        if-no-files-found: ignore
+        name: redmi-ax3000-firmware
+        path: bin/targets/qualcommax/ipq50xx/
+        if-no-files-found: error
