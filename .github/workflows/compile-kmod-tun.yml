@@ -9,70 +9,42 @@ jobs:
     timeout-minutes: 120
 
     steps:
-    - name: Checkout the exact repository
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        repository: ranmodl/immortalwrt
         submodules: true
 
     - name: Setup build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential clang flex bison g++ gawk \
-        gettext git libncurses5-dev libssl-dev python3-full python3-dev \
-        rsync unzip zlib1g-dev file wget zstd
+        sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git libncurses5-dev libssl-dev python3-full python3-dev rsync unzip zlib1g-dev file wget zstd
 
     - name: Update and install feeds
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Modify the generic kernel config
+    - name: Modify kernel config for TUN
       run: |
-        echo "=== 修改通用内核配置文件 ==="
-        GENERIC_CONFIG="target/linux/generic/config-6.6"
+        echo "=== Modifying kernel configuration ==="
+        KERNEL_CONFIG="target/linux/generic/config-6.6"
         
-        if [ ! -f "$GENERIC_CONFIG" ]; then
-            echo "错误：未找到 $GENERIC_CONFIG"
-            find target/linux -name "config-6.6" | head -5
-            exit 1
+        if [ -f "$KERNEL_CONFIG" ]; then
+            echo "Enabling TUN in kernel config"
+            sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
+            sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
+            echo "TUN configuration enabled"
+        else
+            echo "Kernel config file not found: $KERNEL_CONFIG"
+            find target/linux -name "config-*" | head -5
         fi
-        
-        echo "修改配置文件: $GENERIC_CONFIG"
-        
-        # 备份原配置
-        cp "$GENERIC_CONFIG" "${GENERIC_CONFIG}.backup"
-        
-        # 修改 TUN 配置
-        sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$GENERIC_CONFIG"
-        sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$GENERIC_CONFIG"
-        
-        echo "=== 修改后的配置 ==="
-        grep "CONFIG_TUN" "$GENERIC_CONFIG"
 
-    - name: Create basic config
+    - name: Configure target
       run: |
-        echo "=== 创建基本配置 ==="
-        # 直接创建配置，避免使用 menuconfig
-        cat > .config << 'EOF'
-CONFIG_TARGET_qualcommax=y
-CONFIG_TARGET_qualcommax_ipq50xx=y
-CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
-CONFIG_KERNEL_TUN=y
-CONFIG_KERNEL_TUN_VNET_CROSS_LE=y
-EOF
-        
-        # 运行 defconfig 来填充其他配置
+        echo "CONFIG_TARGET_qualcommax=y" > .config
+        echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
+        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
         make defconfig
-
-    - name: Verify configuration
-      run: |
-        echo "=== 最终配置验证 ==="
-        echo "通用配置文件中的 TUN 配置:"
-        grep "CONFIG_TUN" target/linux/generic/config-6.6
-        
-        echo "当前 .config 中的相关配置:"
-        grep -i "tun\|TUN" .config || echo "在 .config 中未找到 TUN 配置"
 
     - name: Download sources
       run: |
@@ -84,38 +56,24 @@ EOF
 
     - name: Build kernel
       run: |
-        echo "=== 编译内核 ==="
+        echo "=== Building kernel ==="
         make target/compile -j$(nproc) V=s 2>&1 | tail -20
 
-    - name: Check build progress
+    - name: Check for TUN module
       run: |
-        echo "=== 检查编译进度 ==="
-        find build_dir/ -name "*.o" | head -3 || echo "未找到编译对象文件"
-        ls -la build_dir/ 2>/dev/null | head -3 || true
+        echo "=== Checking for TUN module ==="
+        find build_dir/ -name "*tun*" | head -10 || echo "No TUN files found"
 
-    - name: Complete the build
+    - name: Complete build
       run: |
-        echo "=== 完成编译 ==="
-        # 只编译目标文件，不编译整个固件（节省时间）
-        make package/kernel/linux/compile -j$(nproc) V=s 2>&1 | tail -15
+        echo "=== Completing build ==="
+        make -j$(nproc) V=s 2>&1 | tail -15
 
-    - name: Search for TUN module
-      run: |
-        echo "=== 搜索 TUN 模块 ==="
-        # 在内核构建目录中查找
-        KERNEL_DIR=$(find build_dir/ -name "linux-*" -type d | head -1)
-        if [ -n "$KERNEL_DIR" ]; then
-            echo "内核目录: $KERNEL_DIR"
-            find "$KERNEL_DIR" -name "*tun*" -type f | head -10
-            find "$KERNEL_DIR" -name "tun.ko" || echo "未找到 tun.ko"
-        else
-            echo "未找到内核构建目录"
-            find build_dir/ -name "*tun*" | head -5
-        fi
-
-    - name: Upload any found modules
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: tun-module-search-results
-        path: build_dir/
+        name: firmware-with-tun
+        path: |
+          bin/targets/qualcommax/ipq50xx/*.bin
+          bin/targets/qualcommax/ipq50xx/*.itb
         if-no-files-found: ignore
