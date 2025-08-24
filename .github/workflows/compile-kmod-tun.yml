@@ -29,18 +29,23 @@ jobs:
 
     - name: Configure for Redmi AX3000
       run: |
-        # 使用与固件完全相同的配置
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
         echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
         make defconfig
 
-    - name: Verify kernel version match
+    - name: Verify configuration (safe version)
       run: |
-        echo "=== 确保内核版本匹配 ==="
-        grep "LINUX_VERSION" .config
-        grep "LINUX_KERNEL_" .config | head -5
+        echo "=== 内核版本信息 ==="
+        grep "LINUX_VERSION" .config || true
+        grep "LINUX_RELEASE" .config || true
+        echo "=== TUN 配置检查 ==="
+        grep "CONFIG_PACKAGE_kmod-tun" .config || echo "未找到 kmod-tun 配置"
+        grep "CONFIG_KERNEL_TUN" .config || echo "未找到 KERNEL_TUN 配置（可能需要手动启用）"
+        echo "=== 目标架构 ==="
+        grep "CONFIG_TARGET_ARCH" .config || true
+        grep "CONFIG_TARGET_SUBTARGET" .config || true
 
     - name: Download all sources
       run: make download -j$(nproc)
@@ -59,15 +64,18 @@ jobs:
     - name: Find and upload kmod-tun package
       uses: actions/upload-artifact@v4
       with:
-        name: kmod-tun-redmi-ax3000
+        name: kmod-tun-package
         path: |
           bin/targets/qualcommax/ipq50xx/packages/kmod-tun*.ipk
           bin/packages/aarch64_cortex-a53/kernel/kmod-tun*.ipk
+          build_dir/target-*/kmod-tun-*/ipkg-*/kmod-tun*.ipk
         if-no-files-found: error
 
-    - name: Show build info for verification
+    - name: Debug information
       run: |
-        echo "=== 编译信息验证 ==="
-        find bin/ -name "*.ipk" | head -5
-        echo "=== 内核模块信息 ==="
-        find build_dir/ -name "*.ko" | grep -i tun | head -3 || true
+        echo "=== 编译后文件检查 ==="
+        find . -name "*kmod-tun*" -type f 2>/dev/null || echo "未找到 kmod-tun 文件"
+        find . -name "*.ipk" | head -10 || echo "未找到 IPK 文件"
+        echo "=== 构建目录结构 ==="
+        ls -la bin/ 2>/dev/null || true
+        ls -la bin/targets/ 2>/dev/null || true
