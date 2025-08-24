@@ -1,4 +1,4 @@
-name: Compile kmod-tun for Redmi AX3000
+name: Compile TUN module for Redmi AX3000
 
 on:
   workflow_dispatch:
@@ -27,55 +27,54 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
+    - name: Find the correct TUN package name
+      run: |
+        echo "=== 搜索所有包含 tun 的包 ==="
+        find . -name "*.mk" -exec grep -l "tun\|TUN" {} \; | head -10
+        echo ""
+        echo "=== 在 feeds 中搜索 tun 相关包 ==="
+        ./scripts/feeds list | grep -i tun | head -10
+        echo ""
+        echo "=== 在内核包目录中搜索 ==="
+        find package/kernel/ -name "*" -type f | grep -i tun | head -10 || true
+        echo ""
+        echo "=== 查看内核模块配置 ==="
+        find . -name "config-*" -exec grep -l "tun\|TUN" {} \; | head -3
+        find . -name "config-*" -exec grep -h "CONFIG_TUN" {} \; | head -5 || true
+
     - name: Configure for Redmi AX3000
       run: |
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
+        # 先不指定具体包，让 defconfig 自动配置
         make defconfig
 
-    - name: Verify configuration (safe version)
+    - name: Check available kernel modules
       run: |
-        echo "=== 内核版本信息 ==="
-        grep "LINUX_VERSION" .config || true
-        grep "LINUX_RELEASE" .config || true
-        echo "=== TUN 配置检查 ==="
-        grep "CONFIG_PACKAGE_kmod-tun" .config || echo "未找到 kmod-tun 配置"
-        grep "CONFIG_KERNEL_TUN" .config || echo "未找到 KERNEL_TUN 配置（可能需要手动启用）"
-        echo "=== 目标架构 ==="
-        grep "CONFIG_TARGET_ARCH" .config || true
-        grep "CONFIG_TARGET_SUBTARGET" .config || true
+        echo "=== 可用的内核模块包 ==="
+        grep "CONFIG_PACKAGE_kmod-" .config | grep -i tun | head -10 || echo "没有找到 TUN 相关内核模块"
+        echo ""
+        echo "=== 所有内核模块配置 ==="
+        grep "CONFIG_PACKAGE_kmod-" .config | head -20
 
-    - name: Download all sources
-      run: make download -j$(nproc)
-
-    - name: Build toolchain
-      run: make toolchain/install -j$(nproc) V=s
-
-    - name: Build target and kernel
+    - name: Build toolchain and kernel first
       run: |
-        make target/compile -j$(nproc) V=s
-        make package/kernel/linux/compile -j$(nproc) V=s
+        make toolchain/install -j$(nproc)
+        make target/compile -j$(nproc)
+        make package/kernel/linux/compile -j$(nproc)
 
-    - name: Build kmod-tun package
-      run: make package/kmod-tun/compile -j$(nproc) V=s
-
-    - name: Find and upload kmod-tun package
-      uses: actions/upload-artifact@v4
-      with:
-        name: kmod-tun-package
-        path: |
-          bin/targets/qualcommax/ipq50xx/packages/kmod-tun*.ipk
-          bin/packages/aarch64_cortex-a53/kernel/kmod-tun*.ipk
-          build_dir/target-*/kmod-tun-*/ipkg-*/kmod-tun*.ipk
-        if-no-files-found: error
-
-    - name: Debug information
+    - name: Try to find and build TUN module
       run: |
-        echo "=== 编译后文件检查 ==="
-        find . -name "*kmod-tun*" -type f 2>/dev/null || echo "未找到 kmod-tun 文件"
-        find . -name "*.ipk" | head -10 || echo "未找到 IPK 文件"
-        echo "=== 构建目录结构 ==="
-        ls -la bin/ 2>/dev/null || true
-        ls -la bin/targets/ 2>/dev/null || true
+        echo "=== 尝试编译所有内核模块 ==="
+        # 先查看有哪些内核模块可以编译
+        find package/ -name "Makefile" -exec grep -l "tun\|TUN" {} \; | head -5
+        
+        # 尝试编译可能的相关包
+        make package/kernel/linux/compile -j$(nproc) V=s 2>&1 | grep -A 5 -B 5 "tun\|TUN" || echo "编译过程中未找到 TUN 相关输出"
+
+    - name: Search for any built modules
+      run: |
+        echo "=== 搜索所有已编译的模块 ==="
+        find . -name "*.ko" | grep -i tun | head -10 || echo "未找到 TUN 相关模块"
+        find . -name "*.ipk" | head -10 || echo "未找到任何 IPK 文件"
