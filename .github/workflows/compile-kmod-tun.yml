@@ -53,13 +53,31 @@ jobs:
         
         echo "使用内核配置文件: $KERNEL_CONFIG"
         
-        # 备份并修改配置
-        cp "$KERNEL_CONFIG" "${KERNEL_CONFIG}.backup"
-        sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
-        sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
+        # 检查文件内容
+        echo "=== 原配置文件内容（前10行）==="
+        head -10 "$KERNEL_CONFIG" || true
         
-        echo "修改后的 TUN 配置:"
-        grep "CONFIG_TUN" "$KERNEL_CONFIG"
+        # 检查是否已有 TUN 配置
+        echo "=== 现有的 TUN 配置 ==="
+        grep "CONFIG_TUN" "$KERNEL_CONFIG" || echo "没有找到 TUN 配置"
+        
+        # 修改配置（更安全的方法）
+        if grep -q "# CONFIG_TUN is not set" "$KERNEL_CONFIG"; then
+            echo "修改 TUN 配置..."
+            sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
+        else
+            echo "添加 TUN 配置..."
+            echo "CONFIG_TUN=y" >> "$KERNEL_CONFIG"
+        fi
+        
+        if grep -q "# CONFIG_TUN_VNET_CROSS_LE is not set" "$KERNEL_CONFIG"; then
+            sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
+        else
+            echo "CONFIG_TUN_VNET_CROSS_LE=y" >> "$KERNEL_CONFIG"
+        fi
+        
+        echo "=== 修改后的 TUN 配置 ==="
+        grep "CONFIG_TUN" "$KERNEL_CONFIG" || echo "修改后未找到 TUN 配置"
 
     - name: Clean and reconfigure
       run: |
@@ -69,47 +87,44 @@ jobs:
     - name: Verify the configuration
       run: |
         echo "=== 验证配置 ==="
-        # 检查配置是否正确应用
-        grep -i "tun\|TUN" .config || echo "在 .config 中未找到 TUN 配置"
-        
         # 检查内核配置
         find target/linux -name "config-6.6" -exec grep -l "CONFIG_TUN" {} \; | head -3
-        find target/linux -name "config-6.6" -exec grep -h "CONFIG_TUN" {} \; | head -5
+        find target/linux -name "config-6.6" -exec grep -h "CONFIG_TUN" {} \; | head -5 || echo "未找到 TUN 配置"
 
-    - name: Download and build
+    - name: Download sources
       run: |
         make download -j$(nproc)
-        make toolchain/install -j$(nproc)
 
-    - name: Build the kernel
+    - name: Build toolchain
+      run: |
+        make toolchain/install -j$(nproc) V=s
+
+    - name: Build kernel
       run: |
         echo "=== 编译内核 ==="
-        make target/compile -j$(nproc) V=s 2>&1 | tail -30
+        make target/compile -j$(nproc) V=s 2>&1 | tail -20
 
-    - name: Check for built modules
+    - name: Check build results
       run: |
-        echo "=== 检查编译的模块 ==="
-        find build_dir/ -name "*.ko" | grep -i tun | head -5 || echo "未找到 TUN 模块"
-        
-        # 查看构建目录结构
-        echo "构建目录内容:"
+        echo "=== 检查编译结果 ==="
+        find build_dir/ -name "*.ko" | head -5 || echo "未找到内核模块"
         ls -la build_dir/ 2>/dev/null | head -5 || true
 
-    - name: Complete the build
+    - name: Complete build
       run: |
         echo "=== 完成编译 ==="
-        make -j$(nproc) V=s 2>&1 | tail -20
+        make -j$(nproc) V=s 2>&1 | tail -15
 
     - name: Prepare artifacts
       run: |
-        echo "=== 最终文件 ==="
-        find bin/ -name "*.bin" -o -name "*.itb" -o -name "*.ubi" | head -5
-        find build_dir/ -name "tun.ko" || echo "未找到 tun.ko"
+        echo "=== 生成的文件 ==="
+        find bin/ -name "*.bin" -o -name "*.itb" -o -name "*.ubi" | head -5 || echo "未找到固件文件"
+        find . -name "tun.ko" | head -3 || echo "未找到 tun.ko"
 
-    - name: Upload results
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: redmi-ax3000-build
+        name: redmi-ax3000-final
         path: |
           bin/targets/qualcommax/ipq50xx/
         if-no-files-found: warn
