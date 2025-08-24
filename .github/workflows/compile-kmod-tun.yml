@@ -1,12 +1,12 @@
-name: Diagnose Build Issue
+name: Check Available Devices
 
 on:
   workflow_dispatch:
 
 jobs:
-  diagnose:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
     - name: Checkout repository
@@ -16,48 +16,32 @@ jobs:
         ref: openwrt-24.10
         submodules: true
 
-    - name: Setup environment
+    - name: List all qualcommax devices
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential git libncurses5-dev
+        echo "=== qualcommax 的所有设备配置 ==="
+        # 查看 image Makefile 中的所有设备定义
+        if [ -f "target/linux/qualcommax/image/Makefile" ]; then
+            echo "=== Makefile 中的设备定义 ==="
+            grep "define Device" target/linux/qualcommax/image/Makefile | head -20
+            echo ""
+            echo "=== 详细的设备配置 ==="
+            grep -A 10 "define Device" target/linux/qualcommax/image/Makefile | head -30
+        else
+            echo "未找到 target/linux/qualcommax/image/Makefile"
+            find target/linux/qualcommax -name "Makefile" | head -5
+        fi
 
-    - name: Check directory structure
+    - name: Check config files
       run: |
-        echo "=== 仓库结构 ==="
-        ls -la
-        echo "=== 目标目录结构 ==="
-        find . -name "target" -type d | head -3
-        find . -name "qualcommax" -type d | head -3
-        echo "=== 配置文件 ==="
-        find . -name "*.mk" -path "*/qualcommax/*" | head -5
-
-    - name: Find device configuration
-      run: |
-        echo "=== 查找设备配置 ==="
-        # 搜索 Redmi AX3000 配置
-        find . -name "*.mk" -exec grep -l "redmi.*ax3000\|ax3000.*redmi" {} \; | head -5
+        echo "=== 配置文件检查 ==="
+        # 查看配置选项
+        find target/linux -name "Config.in" -exec grep -l "qualcommax" {} \; | head -3
         echo ""
-        echo "=== 查看 Makefile ==="
-        cat target/linux/qualcommax/image/Makefile | grep -A 5 -B 5 "redmi\|ax3000" || true
+        echo "=== 配置选项 ==="
+        find target/linux -name "Config.in" -exec grep -A 3 -B 3 "qualcommax" {} \; | head -20
 
-    - name: Try to configure
+    - name: Check for Redmi AX3000
       run: |
-        echo "=== 尝试配置 ==="
-        # 查看可用的配置
-        make help | grep "config" || true
-        echo ""
-        echo "=== 尝试列出配置 ==="
-        make menuconfig 2>/dev/null || echo "menuconfig 不可用"
-        echo ""
-        echo "=== 直接查看配置选项 ==="
-        find . -name "Config.in" -exec grep -l "qualcommax" {} \; | head -3
-
-    - name: Build test
-      run: |
-        echo "=== 测试编译 ==="
-        # 尝试一个简单的编译测试
-        make tools/install || echo "工具编译失败"
-        make toolchain/install || echo "工具链编译失败"
-        
-        echo "=== 检查编译环境 ==="
-        ls -la staging_dir/ 2>/dev/null | head -3 || echo "staging_dir 不存在"
+        echo "=== 搜索 Redmi AX3000 ==="
+        # 在整个代码库中搜索
+        find . -name "*.mk" -o -name "*.in" -o -name "*.conf" | xargs grep -l "redmi\|ax3000\|xiaomi" 2>/dev/null | head -10 || echo "未找到相关配置"
