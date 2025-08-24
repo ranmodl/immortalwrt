@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 延长超时，确保完整编译
+    timeout-minutes: 240  # 进一步延长超时时间，确保复杂编译完成
 
     steps:
     - name: Checkout repository
@@ -23,63 +23,100 @@ jobs:
         gettext git libncurses5-dev libssl-dev python3 python3-dev \
         rsync unzip zlib1g-dev file wget
 
-    - name: Configure for device
+    - name: Configure for device and TUN support
       run: |
+        # 1. 基础设备架构配置
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        echo "CONFIG_KERNEL_TUN=y" >> .config
-        # 按需启用 LuCI（如需网页管理）
-        # echo "CONFIG_PACKAGE_luci=y" >> .config
-        # echo "CONFIG_PACKAGE_luci-ssl=y" >> .config
+        
+        # 2. 关键修复：直接修改内核配置文件，强制启用TUN（解决配置覆盖问题）
+        # 替换默认的"未设置"为启用TUN
+        sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' target/linux/generic/config-6.6
+        # 确保TUN辅助配置存在
+        if ! grep -q "CONFIG_TUN_VNET_CROSS_LE=y" target/linux/generic/config-6.6; then
+          echo "CONFIG_TUN_VNET_CROSS_LE=y" >> target/linux/generic/config-6.6
+        fi
+        
+        # 3. 添加必要的基础功能（避免依赖缺失）
+        echo "CONFIG_PACKAGE_openssl-util=y" >> .config  # 基础加密支持
+        echo "CONFIG_PACKAGE_kmod-iptunnel=y" >> .config  # 隧道基础支持
+        echo "CONFIG_PACKAGE_kmod-ipv6=y" >> .config     # 可选：IPv6支持
+        
+        # 4. 生成完整配置
         make defconfig
 
-    - name: Verify TUN configuration
+    - name: Verify TUN configuration (critical check)
       run: |
-        echo "=== 检查 TUN 配置 ==="
-        find target/linux -name "config-*" -exec grep -l "CONFIG_TUN" {} \; | head -3
-        find target/linux -name "config-*" -exec grep -h "CONFIG_TUN" {} \; | head -5
-        grep "TUN" .config || echo "在 .config 中未找到 TUN 配置"
+        echo "=== 验证 TUN 核心配置 ==="
+        echo "检查通用内核配置文件（target/linux/generic/config-6.6）："
+        grep "CONFIG_TUN" target/linux/generic/config-6.6 || echo "错误：TUN 主配置未生效！"
+        grep "CONFIG_TUN_VNET_CROSS_LE" target/linux/generic/config-6.6 || echo "错误：TUN 辅助配置未生效！"
+        
+        echo -e "\n检查最终编译配置文件（.config）："
+        grep "CONFIG_TUN" .config || echo "错误：最终配置中未找到 TUN 支持！"
+        grep "redmi_ax3000" .config || echo "错误：设备型号配置不正确！"
 
     - name: Build toolchain
       run: |
         echo "=== 编译工具链 ==="
-        make toolchain/install -j$(nproc) V=s 2>&1 | tail -50
+        make toolchain/install -j$(nproc) V=s 2>&1 | tail -100
 
-    - name: Build kernel
+    - name: Build kernel with TUN support
       run: |
-        echo "=== 编译内核 ==="
-        make target/compile -j$(nproc) V=s 2>&1 | tail -50
+        echo "=== 编译内核（含TUN支持） ==="
+        make target/compile -j$(nproc) V=s 2>&1 | tail -100
 
-    - name: Build packages
+    - name: Build required packages
       run: |
         echo "=== 编译软件包 ==="
-        make package/compile -j$(nproc) V=s 2>&1 | tail -50
+        make package/compile -j$(nproc) V=s 2>&1 | tail -100
 
-    - name: Build full firmware image
+    - name: Install target filesystem
       run: |
-        echo "=== 生成完整固件镜像 ==="
-        # 安装目标文件系统（将编译好的包写入根文件系统）
+        echo "=== 安装目标文件系统 ==="
         make target/install -j$(nproc) V=s 2>&1 | tail -100
-        # 生成可刷写的固件镜像
-        make image -j$(nproc) V=s 2>&1 | tail -100
 
-    - name: Locate firmware files
+    - name: Generate final firmware image
+      run: |
+        echo "=== 生成最终固件镜像 ==="
+        make image -j$(nproc) V=s 2>&1 | tail -200  # 显示更多日志便于排查
+
+    - name: Locate firmware files (critical step)
       run: |
         echo "=== 定位固件文件 ==="
-        FIRMWARE_DIR="bin/targets/qualcommax/ipq50xx"
-        if [ -d "$FIRMWARE_DIR" ]; then
-          echo "固件目录存在: $FIRMWARE_DIR"
-          ls -l "$FIRMWARE_DIR"
-          find "$FIRMWARE_DIR" -name "*.bin" -o -name "*.ubi"
+        # 搜索所有可能的固件路径
+        find bin/targets/ -name "*.bin" -o -name "*.ubi"
+        # 检查目标设备固件是否存在
+        FIRMWARE_PATH=$(find bin/targets/ -name "*redmi_ax3000*.bin" | head -1)
+        if [ -n "$FIRMWARE_PATH" ]; then
+          echo "找到目标固件：$FIRMWARE_PATH"
+          # 输出固件信息
+          file "$FIRMWARE_PATH"
         else
-          echo "固件目录不存在，搜索整个 bin 目录"
-          find bin/ -name "*.bin" -o -name "*.ubi"
+          echo "错误：未找到 Redmi AX3000 固件！"
+          # 输出完整的bin目录结构便于分析
+          tree bin/targets/
+        fi
+
+    - name: Verify TUN in kernel
+      run: |
+        echo "=== 验证内核中是否包含TUN ==="
+        # 查找编译好的内核文件
+        KERNEL_FILE=$(find bin/targets/ -name "vmlinux" -o -name "zImage" | head -1)
+        if [ -n "$KERNEL_FILE" ]; then
+          echo "检查内核文件：$KERNEL_FILE"
+          # 搜索TUN相关符号
+          strings "$KERNEL_FILE" | grep -i "tun" | head -20
+        else
+          echo "警告：未找到内核文件，无法验证TUN"
         fi
 
     - name: Upload firmware artifacts
       uses: actions/upload-artifact@v4
       with:
         name: redmi-ax3000-tun-firmware
-        path: bin/targets/qualcommax/ipq50xx/*.bin
-        if-no-files-found: error
+        path: |
+          bin/targets/**/*.bin
+          bin/targets/**/*.ubi
+        if-no-files-found: error  # 固件必须生成，否则报错
