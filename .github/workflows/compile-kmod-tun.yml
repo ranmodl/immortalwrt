@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
     - name: Checkout repository
@@ -31,72 +31,30 @@ jobs:
         echo "CONFIG_KERNEL_TUN=y" >> .config
         make defconfig
 
-    - name: Verify TUN configuration
+    - name: Build firmware
       run: |
-        echo "=== 检查 TUN 配置 ==="
-        # 检查内核配置
-        find target/linux -name "config-*" -exec grep -l "CONFIG_TUN" {} \; | head -3
-        find target/linux -name "config-*" -exec grep -h "CONFIG_TUN" {} \; | head -5
-        
-        # 检查当前配置
-        grep "TUN" .config || echo "在 .config 中未找到 TUN 配置"
+        echo "=== 开始编译固件 ==="
+        make -j$(nproc) V=s 2>&1 | tail -50
 
-    - name: Build toolchain and kernel
+    - name: List generated files
       run: |
-        echo "=== 编译工具链和内核 ==="
-        make toolchain/install -j$(nproc) V=s
-        make target/compile -j$(nproc) V=s 2>&1 | tail -30
+        echo "=== 生成的文件列表 ==="
+        find bin/ -name "*.bin" -o -name "*.itb" -o -name "*.ubi" | head -10
+        echo "=== 文件详情 ==="
+        ls -la bin/targets/qualcommax/ipq50xx/ || echo "目录不存在"
+        echo "=== 文件大小 ==="
+        du -h bin/targets/qualcommax/ipq50xx/*.bin 2>/dev/null || echo "未找到bin文件"
 
-    - name: Build kernel modules
-      run: |
-        echo "=== 编译内核模块 ==="
-        make package/kernel/linux/compile -j$(nproc) V=s 2>&1 | tail -30
-
-    - name: Search for TUN module
-      run: |
-        echo "=== 查找 TUN 模块 ==="
-        # 在内核构建目录中搜索
-        KERNEL_DIR=$(find build_dir/ -name "linux-*" -type d | head -1)
-        if [ -n "$KERNEL_DIR" ]; then
-            echo "内核目录: $KERNEL_DIR"
-            find "$KERNEL_DIR" -name "*tun*" -type f | head -10
-            find "$KERNEL_DIR" -name "tun.ko" || echo "未找到 tun.ko"
-        else
-            echo "未找到内核构建目录"
-            find build_dir/ -name "*tun*" | head -5
-        fi
-
-    - name: Check if TUN is built-in
-      run: |
-        echo "=== 检查 TUN 是否内置 ==="
-        # 查看内核配置
-        KERNEL_DIR=$(find build_dir/ -name "linux-*" -type d | head -1)
-        if [ -n "$KERNEL_DIR" ]; then
-            echo "检查内核配置:"
-            grep "CONFIG_TUN" "$KERNEL_DIR/.config" || echo "在内核配置中未找到 TUN"
-        fi
-
-    - name: Create manual package if module found
-      run: |
-        echo "=== 手动处理找到的模块 ==="
-        # 如果找到 tun.ko，手动创建包
-        if find build_dir/ -name "tun.ko" | grep -q .; then
-            echo "找到 tun.ko 模块"
-            TUN_KO=$(find build_dir/ -name "tun.ko" | head -1)
-            echo "模块位置: $TUN_KO"
-            
-            # 创建简单的包结构
-            mkdir -p kmod-tun-packaging
-            cp "$TUN_KO" kmod-tun-packaging/
-            echo "手动打包完成"
-        else
-            echo "未找到 tun.ko，TUN 可能已内置到内核中"
-        fi
-
-    - name: Upload results
+    - name: Upload firmware artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: tun-support-results
-        path: |
-          kmod-tun-packaging/
-        if-no-files-found: ignore
+        name: redmi-ax3000-firmware
+        path: bin/targets/qualcommax/ipq50xx/*.bin
+        if-no-files-found: error
+
+    - name: Upload all artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: all-build-files
+        path: bin/targets/qualcommax/ipq50xx/
+        if-no-files-found: warn
