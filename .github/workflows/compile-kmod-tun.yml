@@ -26,47 +26,42 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Find TUN-related packages
-      run: |
-        echo "=== 搜索所有包含 tun 的包 ==="
-        find . -name "*.mk" -exec grep -l "tun\|TUN" {} \; | head -20
-        echo ""
-        echo "=== 在 feeds 中搜索 tun ==="
-        ./scripts/feeds list | grep -i tun || true
-        echo ""
-        echo "=== 在 kernel 包中搜索 ==="
-        find package/kernel/ -name "*" -type d | grep -i tun || true
-        echo ""
-        echo "=== 查看内核配置选项 ==="
-        grep -i tun target/linux/*/config-* 2>/dev/null | head -10 || true
-
-    - name: Configure for Redmi AX3000
+    - name: Configure for Redmi AX3000 with TUN
       run: |
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        # 先让系统自动配置，然后我们再手动启用 TUN
+        
+        # 启用 TUN 支持！
+        echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
+        echo "CONFIG_KERNEL_TUN=y" >> .config
+        
         make defconfig
 
-    - name: Check kernel config for TUN
+    - name: Verify TUN configuration
       run: |
-        echo "=== 当前配置中与 TUN 相关的选项 ==="
-        grep -i tun .config || echo "没有找到 TUN 相关配置"
-        echo ""
-        echo "=== 尝试在 menuconfig 中查找 ==="
-        # 查看内核配置
-        grep -n "TUN\|tun" target/linux/generic/config-* 2>/dev/null || true
+        echo "=== 检查 TUN 配置是否已启用 ==="
+        grep "CONFIG_PACKAGE_kmod-tun" .config
+        grep "CONFIG_KERNEL_TUN" .config
 
-    - name: Build toolchain and kernel
+    - name: Build toolchain first
       run: |
-        # 先编译工具链和内核
         make toolchain/install -j$(nproc)
-        make target/compile -j$(nproc)
-        make package/kernel/linux/compile -j$(nproc)
 
-    - name: Search for built-in TUN support
+    - name: Build target
       run: |
-        echo "=== 检查内核是否内置了 TUN 支持 ==="
-        # 查看编译好的内核配置
-        find build_dir/ -name ".config" -exec grep -l "CONFIG_TUN" {} \; | head -5
-        find build_dir/ -name ".config" -exec grep -H "CONFIG_TUN" {} \; | head -5 || true
+        make target/compile -j$(nproc)
+
+    - name: Build kmod-tun package
+      run: |
+        make package/kmod-tun/compile -j$(nproc) V=s
+
+    - name: Find and upload kmod-tun package
+      uses: actions/upload-artifact@v4
+      with:
+        name: kmod-tun-package
+        path: |
+          bin/targets/qualcommax/ipq50xx/packages/kmod-tun*.ipk
+          bin/packages/arm_cortex-a7/kernel/kmod-tun*.ipk
+          build_dir/target-*/kmod-tun-*/ipkg-*/kmod-tun*.ipk
+        if-no-files-found: warn
