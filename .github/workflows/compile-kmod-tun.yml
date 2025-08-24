@@ -1,4 +1,4 @@
-name: Build kmod-tun for Redmi AX3000
+name: Build TUN support for Redmi AX3000
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
     - name: Checkout repository
@@ -23,44 +23,80 @@ jobs:
         gettext git libncurses5-dev libssl-dev python3 python3-dev \
         rsync unzip zlib1g-dev file wget
 
-    - name: Simple configuration
+    - name: Configure for device
       run: |
-        # 最简单配置
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
+        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
+        echo "CONFIG_KERNEL_TUN=y" >> .config
         make defconfig
 
-    - name: Download required sources
+    - name: Verify TUN configuration
       run: |
-        make package/kmod-tun/download V=s
-
-    - name: Build kmod-tun with debug
-      run: |
-        echo "=== 开始编译 kmod-tun ==="
-        # 详细编译输出
-        make package/kmod-tun/compile V=s 2>&1 | head -100
-        echo "=== 编译完成 ==="
-
-    - name: Search for package
-      run: |
-        echo "=== 搜索编译好的包 ==="
-        # 在所有可能的位置搜索
-        find . -name "*.ipk" | grep -i kmod-tun || find . -name "*.ipk" | head -5
-        echo "=== 构建目录 ==="
-        find build_dir/ -name "kmod-tun*" -type d | head -3
-        find build_dir/ -name "*.ipk" | head -3
-
-    - name: Manual package creation
-      run: |
-        echo "=== 手动检查 ==="
-        # 检查是否编译了模块文件
-        find . -name "tun.ko" | head -3
-        find . -name "*.ko" | grep -i tun | head -3
+        echo "=== 检查 TUN 配置 ==="
+        # 检查内核配置
+        find target/linux -name "config-*" -exec grep -l "CONFIG_TUN" {} \; | head -3
+        find target/linux -name "config-*" -exec grep -h "CONFIG_TUN" {} \; | head -5
         
-        # 如果找到模块，尝试手动创建包
-        if find . -name "tun.ko" | grep -q .; then
-          echo "找到 tun.ko 模块"
-          TUN_KO=$(find . -name "tun.ko" | head -1)
-          echo "模块位置: $TUN_KO"
+        # 检查当前配置
+        grep "TUN" .config || echo "在 .config 中未找到 TUN 配置"
+
+    - name: Build toolchain and kernel
+      run: |
+        echo "=== 编译工具链和内核 ==="
+        make toolchain/install -j$(nproc) V=s
+        make target/compile -j$(nproc) V=s 2>&1 | tail -30
+
+    - name: Build kernel modules
+      run: |
+        echo "=== 编译内核模块 ==="
+        make package/kernel/linux/compile -j$(nproc) V=s 2>&1 | tail -30
+
+    - name: Search for TUN module
+      run: |
+        echo "=== 查找 TUN 模块 ==="
+        # 在内核构建目录中搜索
+        KERNEL_DIR=$(find build_dir/ -name "linux-*" -type d | head -1)
+        if [ -n "$KERNEL_DIR" ]; then
+            echo "内核目录: $KERNEL_DIR"
+            find "$KERNEL_DIR" -name "*tun*" -type f | head -10
+            find "$KERNEL_DIR" -name "tun.ko" || echo "未找到 tun.ko"
+        else
+            echo "未找到内核构建目录"
+            find build_dir/ -name "*tun*" | head -5
         fi
+
+    - name: Check if TUN is built-in
+      run: |
+        echo "=== 检查 TUN 是否内置 ==="
+        # 查看内核配置
+        KERNEL_DIR=$(find build_dir/ -name "linux-*" -type d | head -1)
+        if [ -n "$KERNEL_DIR" ]; then
+            echo "检查内核配置:"
+            grep "CONFIG_TUN" "$KERNEL_DIR/.config" || echo "在内核配置中未找到 TUN"
+        fi
+
+    - name: Create manual package if module found
+      run: |
+        echo "=== 手动处理找到的模块 ==="
+        # 如果找到 tun.ko，手动创建包
+        if find build_dir/ -name "tun.ko" | grep -q .; then
+            echo "找到 tun.ko 模块"
+            TUN_KO=$(find build_dir/ -name "tun.ko" | head -1)
+            echo "模块位置: $TUN_KO"
+            
+            # 创建简单的包结构
+            mkdir -p kmod-tun-packaging
+            cp "$TUN_KO" kmod-tun-packaging/
+            echo "手动打包完成"
+        else
+            echo "未找到 tun.ko，TUN 可能已内置到内核中"
+        fi
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: tun-support-results
+        path: |
+          kmod-tun-packaging/
+        if-no-files-found: ignore
