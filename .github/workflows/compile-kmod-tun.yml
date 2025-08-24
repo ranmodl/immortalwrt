@@ -1,18 +1,19 @@
-name: Compile Firmware for Redmi AX3000 with TUN
+name: Build kmod-tun for Redmi AX3000
 
 on:
   workflow_dispatch:
 
 jobs:
-  compile:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        repository: ranmodl/immortalwrt
+        repository: immortalwrt/immortalwrt
+        ref: openwrt-24.10
         submodules: true
 
     - name: Setup build environment
@@ -22,86 +23,74 @@ jobs:
         gettext git libncurses5-dev libssl-dev python3-full python3-dev \
         rsync unzip zlib1g-dev file wget zstd
 
-    - name: Update and install feeds
+    - name: Update feeds
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Find correct device configuration
+    - name: Configure for exact device and kernel
       run: |
-        echo "=== 查找 Redmi AX3000 设备配置 ==="
-        # 查找所有可能的设备配置
-        find target/linux/qualcommax -name "*.mk" | head -10
-        echo ""
-        echo "=== 搜索 redmi 或 ax3000 配置 ==="
-        find target/linux/qualcommax -name "*.mk" -exec grep -l "redmi\|ax3000\|xiaomi" {} \; | head -5
-        echo ""
-        echo "=== 查看设备配置文件内容 ==="
-        for file in $(find target/linux/qualcommax -name "*.mk" -exec grep -l "redmi\|ax3000\|xiaomi" {} \;); do
-          echo "文件: $file"
-          grep "DEVICE\|PROFILE" "$file" | head -3
-          echo ""
-        done
-
-    - name: Configure for Redmi AX3000
-      run: |
-        echo "=== 配置 Redmi AX3000 ==="
-        # 基本架构配置
         echo "CONFIG_TARGET_qualcommax=y" > .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
-        
-        # 尝试正确的设备标识符（根据上一步的结果调整）
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
-        
-        # 启用 TUN 支持
+        echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
         echo "CONFIG_KERNEL_TUN=y" >> .config
-        echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
-        
-        # 启用生成 factory 固件
-        echo "CONFIG_TARGET_IMAGES_INCLUDE_UBI=y" >> .config
-        echo "CONFIG_TARGET_UBIFS_FREE_SPACE_FIXUP=y" >> .config
-        
         make defconfig
+
+    - name: Verify configuration
+      run: |
+        echo "=== 配置验证 ==="
+        grep "CONFIG_TARGET" .config | head -5
+        grep "CONFIG_PACKAGE_kmod-tun" .config
+        grep "CONFIG_KERNEL_TUN" .config
+
+    - name: Download only required sources
+      run: |
+        make package/kmod-tun/download V=s
+
+    - name: Build kmod-tun only
+      run: |
+        echo "=== 开始编译 kmod-tun ==="
+        make package/kmod-tun/compile -j$(nproc) V=s 2>&1 | tail -30
+
+    - name: Find the kmod-tun package
+      run: |
+        echo "=== 查找生成的 kmod-tun 包 ==="
+        find . -name "*kmod-tun*.ipk" | head -5 || echo "未找到 kmod-tun IPK 文件"
         
-        echo "=== 验证配置 ==="
-        grep "DEVICE\|redmi\|ax3000" .config || echo "未找到设备配置"
-        grep "TUN" .config || echo "未找到 TUN 配置"
+        # 详细搜索
+        echo "=== 详细搜索 ==="
+        find bin/ -name "*.ipk" | grep -i tun || find build_dir/ -name "*.ipk" | grep -i tun || echo "未找到任何 IPK 文件"
+        
+        # 查看构建目录
+        echo "=== 构建目录内容 ==="
+        ls -la bin/packages/ 2>/dev/null || true
+        ls -la bin/targets/ 2>/dev/null || true
 
-    - name: Modify kernel config
+    - name: Extract package info
       run: |
-        echo "=== 修改内核配置启用 TUN ==="
-        KERNEL_CONFIG="target/linux/generic/config-6.6"
-        if [ -f "$KERNEL_CONFIG" ]; then
-          sed -i 's/# CONFIG_TUN is not set/CONFIG_TUN=y/' "$KERNEL_CONFIG"
-          sed -i 's/# CONFIG_TUN_VNET_CROSS_LE is not set/CONFIG_TUN_VNET_CROSS_LE=y/' "$KERNEL_CONFIG"
-          echo "TUN 配置已启用"
-        fi
+        echo "=== 包信息 ==="
+        # 查找所有可能的包位置
+        find . -name "*kmod-tun*" -type f 2>/dev/null | head -10 || echo "未找到 kmod-tun 文件"
 
-    - name: Download sources
-      run: |
-        make download -j$(nproc)
-
-    - name: Build toolchain
-      run: |
-        make toolchain/install -j$(nproc) V=s
-
-    - name: Build firmware
-      run: |
-        echo "=== 开始编译固件 ==="
-        make -j$(nproc) V=s 2>&1 | tail -30
-
-    - name: Verify build results
-      run: |
-        echo "=== 检查生成的文件 ==="
-        find bin/ -name "*redmi*" -o -name "*ax3000*" | head -10 || echo "未找到 Redmi AX3000 文件"
-        find bin/ -name "*.bin" -o -name "*.ubi" | head -10
-        echo ""
-        echo "=== 文件详情 ==="
-        ls -la bin/targets/qualcommax/ipq50xx/ || echo "目录不存在"
-
-    - name: Upload firmware
+    - name: Upload kmod-tun package
       uses: actions/upload-artifact@v4
       with:
-        name: redmi-ax3000-firmware
-        path: bin/targets/qualcommax/ipq50xx/
+        name: kmod-tun-package
+        path: |
+          bin/packages/*/kmod-tun*.ipk
+          bin/targets/*/packages/kmod-tun*.ipk
+          build_dir/*/kmod-tun*/ipkg*/kmod-tun*.ipk
         if-no-files-found: error
+
+    - name: Debug if failed
+      if: failure()
+      run: |
+        echo "=== 调试信息 ==="
+        echo "当前目录:"
+        pwd
+        ls -la
+        echo "构建目录结构:"
+        find . -name "kmod-tun*" -type d | head -5
+        echo "Makefile 位置:"
+        find . -name "Makefile" -exec grep -l "kmod-tun" {} \; | head -3
