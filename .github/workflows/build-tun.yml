@@ -1,0 +1,50 @@
+name: Build Redmi AX3000 with TUN
+
+on:
+  workflow_dispatch:  # 手动触发编译
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300  # 延长超时时间
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'  # 拉取完整子模块
+
+      - name: Initialize environment
+        run: |
+          # 安装仓库要求的依赖（仓库脚本已适配）
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          # 更新 feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure firmware (enable TUN)
+        run: |
+          # 加载默认设备配置（仓库已适配 Redmi AX3000）
+          make defconfig
+          
+          # 关键：启用 TUN 内核内置支持（避免模块依赖）
+          echo "CONFIG_KERNEL_TUN=y" >> .config
+          echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-tun=y" >> .config  # 显式添加 TUN 模块
+          
+          # 重新生成配置，确保 TUN 生效
+          make defconfig
+
+      - name: Start compilation
+        run: |
+          # 多线程编译（根据云端 CPU 自动调整）
+          make -j$(nproc) V=s 2>&1 | tee build.log
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmi-ax3000-tun-firmware
+          path: |
+            bin/targets/qualcommax/ipq50xx/*.bin
+            bin/targets/qualcommax/ipq50xx/*.ubi
+          retention-days: 30  # 固件保留 30 天
