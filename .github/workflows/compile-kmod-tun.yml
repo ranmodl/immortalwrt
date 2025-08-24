@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 延长超时时间，完整编译需要更久
+    timeout-minutes: 180  # 延长超时，确保完整编译
 
     steps:
     - name: Checkout repository
@@ -29,9 +29,9 @@ jobs:
         echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
         echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
         echo "CONFIG_KERNEL_TUN=y" >> .config
-        # 添加基本LuCI界面支持（可选，根据需要调整）
-        echo "CONFIG_PACKAGE_luci=y" >> .config
-        echo "CONFIG_PACKAGE_luci-ssl=y" >> .config
+        # 按需启用 LuCI（如需网页管理）
+        # echo "CONFIG_PACKAGE_luci=y" >> .config
+        # echo "CONFIG_PACKAGE_luci-ssl=y" >> .config
         make defconfig
 
     - name: Verify TUN configuration
@@ -44,7 +44,7 @@ jobs:
     - name: Build toolchain
       run: |
         echo "=== 编译工具链 ==="
-        make toolchain/install -j$(nproc) V=s
+        make toolchain/install -j$(nproc) V=s 2>&1 | tail -50
 
     - name: Build kernel
       run: |
@@ -59,6 +59,9 @@ jobs:
     - name: Build full firmware image
       run: |
         echo "=== 生成完整固件镜像 ==="
+        # 安装目标文件系统（将编译好的包写入根文件系统）
+        make target/install -j$(nproc) V=s 2>&1 | tail -100
+        # 生成可刷写的固件镜像
         make image -j$(nproc) V=s 2>&1 | tail -100
 
     - name: Locate firmware files
@@ -68,30 +71,15 @@ jobs:
         if [ -d "$FIRMWARE_DIR" ]; then
           echo "固件目录存在: $FIRMWARE_DIR"
           ls -l "$FIRMWARE_DIR"
-          # 查找所有可能的固件文件
           find "$FIRMWARE_DIR" -name "*.bin" -o -name "*.ubi"
         else
-          echo "固件目录不存在，搜索整个bin目录"
+          echo "固件目录不存在，搜索整个 bin 目录"
           find bin/ -name "*.bin" -o -name "*.ubi"
-        fi
-
-    - name: Check TUN integration
-      run: |
-        echo "=== 验证TUN集成状态 ==="
-        KERNEL_BIN=$(find bin/targets/ -name "vmlinux" -o -name "zImage" | head -1)
-        if [ -n "$KERNEL_BIN" ]; then
-          echo "检查内核二进制文件: $KERNEL_BIN"
-          strings "$KERNEL_BIN" | grep -i "tun" | head -10
-        else
-          echo "未找到内核二进制文件"
         fi
 
     - name: Upload firmware artifacts
       uses: actions/upload-artifact@v4
       with:
         name: redmi-ax3000-tun-firmware
-        path: |
-          bin/targets/qualcommax/ipq50xx/*.bin
-          bin/targets/qualcommax/ipq50xx/*.ubi
-          bin/targets/qualcommax/ipq50xx/*.tar.gz
-        if-no-files-found: error  # 固件必须生成，否则报错
+        path: bin/targets/qualcommax/ipq50xx/*.bin
+        if-no-files-found: error
