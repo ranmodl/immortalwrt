@@ -1,4 +1,4 @@
-name: Build Firmware for Redmi AX3000 with TUN
+name: Build TUN support for Redmi AX3000
 
 on:
   workflow_dispatch:
@@ -6,13 +6,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180  # 延长超时时间，完整编译需要更久
 
     steps:
-    - name: Checkout custom repository
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        repository: kmiit/Redmi_AX3000_immortalwrt
+        repository: immortalwrt/immortalwrt
+        ref: openwrt-24.10
         submodules: true
 
     - name: Setup build environment
@@ -22,60 +23,75 @@ jobs:
         gettext git libncurses5-dev libssl-dev python3 python3-dev \
         rsync unzip zlib1g-dev file wget
 
-    - name: Update and install feeds
+    - name: Configure for device
       run: |
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-
-    - name: Configure for Redmi AX3000
-      run: |
-        echo "=== 配置 Redmi AX3000 ==="
-        # 使用这个仓库的配置（应该已经包含正确配置）
-        make defconfig
-        
-        # 启用 TUN 支持
+        echo "CONFIG_TARGET_qualcommax=y" > .config
+        echo "CONFIG_TARGET_qualcommax_ipq50xx=y" >> .config
+        echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y" >> .config
         echo "CONFIG_KERNEL_TUN=y" >> .config
-        echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
+        # 添加基本LuCI界面支持（可选，根据需要调整）
+        echo "CONFIG_PACKAGE_luci=y" >> .config
+        echo "CONFIG_PACKAGE_luci-ssl=y" >> .config
         make defconfig
 
-    - name: Verify configuration
+    - name: Verify TUN configuration
       run: |
-        echo "=== 验证配置 ==="
-        grep "CONFIG_TARGET" .config | head -5
-        grep "CONFIG_KERNEL_TUN" .config || echo "TUN 配置未设置"
-        echo "=== 设备配置 ==="
-        grep "redmi\|ax3000" .config || echo "设备配置未找到"
+        echo "=== 检查 TUN 配置 ==="
+        find target/linux -name "config-*" -exec grep -l "CONFIG_TUN" {} \; | head -3
+        find target/linux -name "config-*" -exec grep -h "CONFIG_TUN" {} \; | head -5
+        grep "TUN" .config || echo "在 .config 中未找到 TUN 配置"
 
-    - name: Build firmware
+    - name: Build toolchain
       run: |
-        echo "=== 开始编译固件 ==="
-        make -j$(nproc) V=s 2>&1 | tail -50
+        echo "=== 编译工具链 ==="
+        make toolchain/install -j$(nproc) V=s
 
-    - name: Check generated files
+    - name: Build kernel
       run: |
-        echo "=== 检查生成的文件 ==="
-        find bin/ -name "*.bin" -o -name "*.ubi" -o -name "*.itb" | head -10
-        echo "=== 文件详情 ==="
-        ls -la bin/targets/ */ 2>/dev/null | head -5 || echo "查看目录结构"
-        du -h bin/targets/*/*/*.bin 2>/dev/null || echo "未找到bin文件"
+        echo "=== 编译内核 ==="
+        make target/compile -j$(nproc) V=s 2>&1 | tail -50
+
+    - name: Build packages
+      run: |
+        echo "=== 编译软件包 ==="
+        make package/compile -j$(nproc) V=s 2>&1 | tail -50
+
+    - name: Build full firmware image
+      run: |
+        echo "=== 生成完整固件镜像 ==="
+        make image -j$(nproc) V=s 2>&1 | tail -100
+
+    - name: Locate firmware files
+      run: |
+        echo "=== 定位固件文件 ==="
+        FIRMWARE_DIR="bin/targets/qualcommax/ipq50xx"
+        if [ -d "$FIRMWARE_DIR" ]; then
+          echo "固件目录存在: $FIRMWARE_DIR"
+          ls -l "$FIRMWARE_DIR"
+          # 查找所有可能的固件文件
+          find "$FIRMWARE_DIR" -name "*.bin" -o -name "*.ubi"
+        else
+          echo "固件目录不存在，搜索整个bin目录"
+          find bin/ -name "*.bin" -o -name "*.ubi"
+        fi
+
+    - name: Check TUN integration
+      run: |
+        echo "=== 验证TUN集成状态 ==="
+        KERNEL_BIN=$(find bin/targets/ -name "vmlinux" -o -name "zImage" | head -1)
+        if [ -n "$KERNEL_BIN" ]; then
+          echo "检查内核二进制文件: $KERNEL_BIN"
+          strings "$KERNEL_BIN" | grep -i "tun" | head -10
+        else
+          echo "未找到内核二进制文件"
+        fi
 
     - name: Upload firmware artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: redmi-ax3000-firmware
-        path: bin/targets/
-        if-no-files-found: error
-
-    - name: Final check
-      run: |
-        echo "=== 最终检查 ==="
-        # 确保有文件生成
-        if find bin/ -name "*.bin" | grep -q .; then
-            echo "✅ 固件编译成功！"
-            find bin/ -name "*.bin" | head -3
-        else
-            echo "❌ 未找到固件文件"
-            echo "目录结构:"
-            find bin/ -type d 2>/dev/null | head -10
-            exit 1
-        fi
+        name: redmi-ax3000-tun-firmware
+        path: |
+          bin/targets/qualcommax/ipq50xx/*.bin
+          bin/targets/qualcommax/ipq50xx/*.ubi
+          bin/targets/qualcommax/ipq50xx/*.tar.gz
+        if-no-files-found: error  # 固件必须生成，否则报错
