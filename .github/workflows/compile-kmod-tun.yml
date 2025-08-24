@@ -12,7 +12,7 @@ jobs:
     - name: Checkout the exact repository
       uses: actions/checkout@v4
       with:
-        repository: kmiit/Redmi_AX3000_immortalwrt
+        repository: ranmodl/immortalwrt
         submodules: true
 
     - name: Setup build environment
@@ -117,6 +117,5 @@ EOF
       uses: actions/upload-artifact@v4
       with:
         name: tun-module-search-results
-        path: |
-          build_dir/
+        path: build_dir/
         if-no-files-found: ignore
