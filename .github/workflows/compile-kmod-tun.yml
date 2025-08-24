@@ -1,47 +1,81 @@
-name: Check Available Devices
+name: Build Firmware for Redmi AX3000 with TUN
 
 on:
   workflow_dispatch:
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
-    - name: Checkout repository
+    - name: Checkout custom repository
       uses: actions/checkout@v4
       with:
-        repository: immortalwrt/immortalwrt
-        ref: openwrt-24.10
+        repository: kmiit/Redmi_AX3000_immortalwrt
         submodules: true
 
-    - name: List all qualcommax devices
+    - name: Setup build environment
       run: |
-        echo "=== qualcommax 的所有设备配置 ==="
-        # 查看 image Makefile 中的所有设备定义
-        if [ -f "target/linux/qualcommax/image/Makefile" ]; then
-            echo "=== Makefile 中的设备定义 ==="
-            grep "define Device" target/linux/qualcommax/image/Makefile | head -20
-            echo ""
-            echo "=== 详细的设备配置 ==="
-            grep -A 10 "define Device" target/linux/qualcommax/image/Makefile | head -30
+        sudo apt-get update
+        sudo apt-get install -y build-essential clang flex bison g++ gawk \
+        gettext git libncurses5-dev libssl-dev python3 python3-dev \
+        rsync unzip zlib1g-dev file wget
+
+    - name: Update and install feeds
+      run: |
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Configure for Redmi AX3000
+      run: |
+        echo "=== 配置 Redmi AX3000 ==="
+        # 使用这个仓库的配置（应该已经包含正确配置）
+        make defconfig
+        
+        # 启用 TUN 支持
+        echo "CONFIG_KERNEL_TUN=y" >> .config
+        echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
+        make defconfig
+
+    - name: Verify configuration
+      run: |
+        echo "=== 验证配置 ==="
+        grep "CONFIG_TARGET" .config | head -5
+        grep "CONFIG_KERNEL_TUN" .config || echo "TUN 配置未设置"
+        echo "=== 设备配置 ==="
+        grep "redmi\|ax3000" .config || echo "设备配置未找到"
+
+    - name: Build firmware
+      run: |
+        echo "=== 开始编译固件 ==="
+        make -j$(nproc) V=s 2>&1 | tail -50
+
+    - name: Check generated files
+      run: |
+        echo "=== 检查生成的文件 ==="
+        find bin/ -name "*.bin" -o -name "*.ubi" -o -name "*.itb" | head -10
+        echo "=== 文件详情 ==="
+        ls -la bin/targets/ */ 2>/dev/null | head -5 || echo "查看目录结构"
+        du -h bin/targets/*/*/*.bin 2>/dev/null || echo "未找到bin文件"
+
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: redmi-ax3000-firmware
+        path: bin/targets/
+        if-no-files-found: error
+
+    - name: Final check
+      run: |
+        echo "=== 最终检查 ==="
+        # 确保有文件生成
+        if find bin/ -name "*.bin" | grep -q .; then
+            echo "✅ 固件编译成功！"
+            find bin/ -name "*.bin" | head -3
         else
-            echo "未找到 target/linux/qualcommax/image/Makefile"
-            find target/linux/qualcommax -name "Makefile" | head -5
+            echo "❌ 未找到固件文件"
+            echo "目录结构:"
+            find bin/ -type d 2>/dev/null | head -10
+            exit 1
         fi
-
-    - name: Check config files
-      run: |
-        echo "=== 配置文件检查 ==="
-        # 查看配置选项
-        find target/linux -name "Config.in" -exec grep -l "qualcommax" {} \; | head -3
-        echo ""
-        echo "=== 配置选项 ==="
-        find target/linux -name "Config.in" -exec grep -A 3 -B 3 "qualcommax" {} \; | head -20
-
-    - name: Check for Redmi AX3000
-      run: |
-        echo "=== 搜索 Redmi AX3000 ==="
-        # 在整个代码库中搜索
-        find . -name "*.mk" -o -name "*.in" -o -name "*.conf" | xargs grep -l "redmi\|ax3000\|xiaomi" 2>/dev/null | head -10 || echo "未找到相关配置"
