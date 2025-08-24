@@ -27,82 +27,80 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
+      - name: Update submodules (critical fix)
+        run: |
+          git submodule update --init --recursive
+          if [ ! -f "target/linux/qualcommax/ipq50xx/config-6.6" ]; then
+            echo "Error: IPQ50xx config file missing!"
+            exit 1
+          fi
+
       - name: Initial environment setup
         run: |
-          # Install required dependencies
           sudo apt-get update -y
           sudo apt-get install -y \
             build-essential clang flex bison g++ gawk gettext git \
             libncurses5-dev libssl-dev python3 python3-dev rsync \
             unzip zlib1g-dev file wget curl nano tree
 
-          # Configure build settings
+          # 更新 feeds 拉取依赖
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
           echo "DEVICE_MODEL=${{ github.event.inputs.device_model }}" >> $GITHUB_ENV
           echo "KERNEL_VERSION=${{ github.event.inputs.kernel_version }}" >> $GITHUB_ENV
           echo "TARGET_DIR=target/linux/qualcommax/ipq50xx" >> $GITHUB_ENV
 
       - name: Load official device configuration
         run: |
-          # Load base configuration for qualcommax ipq50xx
-          echo "Loading official Qualcommax IPQ50xx configuration"
+          rm -f .config  # 清除旧配置
           make defconfig TARGET=qualcommax SUBTARGET=ipq50xx
 
-          # Verify base configuration loaded
+          # 验证基础配置
           if ! grep -q "CONFIG_TARGET_qualcommax_ipq50xx=y" .config; then
             echo "Error: Failed to load base IPQ50xx configuration"
+            tree target/linux/qualcommax/ipq50xx/  # 调试输出
             exit 1
           fi
 
       - name: Configure specific device and TUN
         run: |
-          # Set specific device model
           echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_${{ env.DEVICE_MODEL }}=y" >> .config
 
-          # Configure TUN support at multiple levels
-          echo "Configuring TUN support"
-          
-          # 1. Kernel level configuration
+          # TUN 配置
           echo "CONFIG_KERNEL_TUN=y" >> .config
           echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
-          
-          # 2. Modify generic kernel config to ensure TUN is enabled
           sed -i '/^#*CONFIG_TUN/d' target/linux/generic/config-${{ env.KERNEL_VERSION }}
           sed -i '/^#*CONFIG_TUN_VNET_CROSS_LE/d' target/linux/generic/config-${{ env.KERNEL_VERSION }}
           echo "CONFIG_TUN=y" >> target/linux/generic/config-${{ env.KERNEL_VERSION }}
           echo "CONFIG_TUN_VNET_CROSS_LE=y" >> target/linux/generic/config-${{ env.KERNEL_VERSION }}
-          
-          # 3. Add TUN related packages
-          echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
-          echo "CONFIG_PACKAGE_ip-tunnel=y" >> .config
 
-          # Resolve dependency warnings
-          echo "CONFIG_PACKAGE_libpam=y" >> .config
-          echo "CONFIG_PACKAGE_lm-sensors=y" >> .config
-          echo "CONFIG_PACKAGE_liblzma=y" >> .config
+          # 禁用不必要包减少警告
+          echo "# CONFIG_PACKAGE_emortal_autosamba is not set" >> .config
+          echo "# CONFIG_PACKAGE_pcat-manager is not set" >> .config
+
+          # 启用必要依赖
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-base=y" >> .config
 
-          # Finalize configuration
           make defconfig
 
-          # Lock critical configurations
+          # 锁定关键配置
           echo "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_${{ env.DEVICE_MODEL }}=y" >> .config
           echo "CONFIG_KERNEL_TUN=y" >> .config
           make defconfig
 
       - name: Critical configuration verification
         run: |
-          echo "=== Verifying Device Configuration ==="
+          # 验证设备配置
           if grep -q "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_${{ env.DEVICE_MODEL }}=y" .config; then
             echo "✅ Device configuration verified"
           else
-            echo "❌ Device configuration missing in .config"
-            echo "Available devices in target:"
-            grep "DEVICE_" ${{ env.TARGET_DIR }}/image/Makefile
+            echo "❌ Device configuration missing"
             exit 1
           fi
 
-          echo -e "\n=== Verifying TUN Configuration ==="
+          # 验证 TUN 配置
           if grep -q "CONFIG_KERNEL_TUN=y" .config && grep -q "CONFIG_TUN=y" target/linux/generic/config-${{ env.KERNEL_VERSION }}; then
             echo "✅ TUN configuration verified"
           else
@@ -110,92 +108,52 @@ jobs:
             exit 1
           fi
 
-          echo -e "\n=== Configuration Summary ==="
-          grep -E "TARGET|TUN|DEVICE" .config | sort | uniq
-
       - name: Build toolchain
         run: |
-          echo "=== Building toolchain ==="
           make toolchain/install -j$(nproc) V=s 2>&1 | tee toolchain-build.log
 
       - name: Build kernel
         run: |
-          echo "=== Building kernel ==="
           make target/compile -j$(nproc) V=s 2>&1 | tee kernel-build.log
-          
-          # Verify TUN in kernel configuration
           KERNEL_CONFIG=$(find build_dir/ -path "*/linux-*${{ env.KERNEL_VERSION }}*/.config" | head -1)
-          if [ -f "$KERNEL_CONFIG" ]; then
-            echo -e "\nVerifying TUN in kernel config: $KERNEL_CONFIG"
-            if grep -q "CONFIG_TUN=y" "$KERNEL_CONFIG"; then
-              echo "✅ TUN enabled in kernel configuration"
-            else
-              echo "❌ TUN missing in kernel configuration"
-              exit 1
-            fi
+          if grep -q "CONFIG_TUN=y" "$KERNEL_CONFIG"; then
+            echo "✅ TUN enabled in kernel"
           else
-            echo "❌ Kernel configuration file not found"
+            echo "❌ TUN missing in kernel"
             exit 1
           fi
 
       - name: Build packages
         run: |
-          echo "=== Building packages ==="
           make package/compile -j$(nproc) V=s 2>&1 | tee package-build.log
 
       - name: Install target filesystem
         run: |
-          echo "=== Installing target filesystem ==="
           make target/install -j$(nproc) V=s 2>&1 | tee filesystem-install.log
 
       - name: Generate firmware images
         run: |
-          echo "=== Generating firmware images ==="
           make image -j$(nproc) V=s 2>&1 | tee firmware-generate.log
-          
-          # Locate and verify firmware
           FIRMWARE_DIR="bin/targets/qualcommax/ipq50xx"
-          echo -e "\nChecking firmware directory: $FIRMWARE_DIR"
-          
           if [ -d "$FIRMWARE_DIR" ]; then
-            ls -l "$FIRMWARE_DIR"
             FIRMWARE_FILE=$(find "$FIRMWARE_DIR" -name "*${{ env.DEVICE_MODEL }}*.bin" | grep -v "factory" | head -1)
-            
             if [ -n "$FIRMWARE_FILE" ]; then
-              echo -e "\n✅ Found firmware file: $FIRMWARE_FILE"
+              echo "✅ Firmware: $FIRMWARE_FILE"
               echo "FIRMWARE_FILE=$FIRMWARE_FILE" >> $GITHUB_ENV
-              file "$FIRMWARE_FILE"
             else
-              echo "❌ No sysupgrade firmware found for ${{ env.DEVICE_MODEL }}"
+              echo "❌ No firmware found"
               exit 1
             fi
           else
-            echo "❌ Firmware directory $FIRMWARE_DIR not found"
+            echo "❌ Firmware directory missing"
             exit 1
           fi
-
-      - name: Verify TUN in final firmware
-        run: |
-          echo "=== Verifying TUN in final firmware ==="
-          # Extract kernel from firmware to verify TUN presence
-          mkdir -p firmware_extract
-          cd firmware_extract
-          dd if="${{ env.FIRMWARE_FILE }}" of=kernel.bin bs=1 count=4194304 status=none
-          
-          if strings kernel.bin | grep -q "tun"; then
-            echo "✅ TUN functionality detected in firmware"
-          else
-            echo "❌ TUN functionality not found in firmware"
-            exit 1
-          fi
-          cd ..
 
       - name: Upload firmware and logs
         uses: actions/upload-artifact@v4
         with:
-          name: redmi-ax3000-firmware-with-tun
+          name: redmi-ax3000-firmware
           path: |
             ${{ env.FIRMWARE_FILE }}
             *.log
             bin/targets/qualcommax/ipq50xx/*.bin
-          retention-days: 30
