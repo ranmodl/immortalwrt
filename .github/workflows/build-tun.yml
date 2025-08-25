@@ -1,4 +1,4 @@
-name: Build Redmi AX3000 with TUN (Debug Image Stage)
+name: Build Redmi AX3000 with TUN (Manual Config Fix)
 
 on:
   workflow_dispatch:
@@ -9,6 +9,9 @@ jobs:
     timeout-minutes: 300
     env:
       CACHE_DIR: "/home/runner/.cache/immortalwrt"
+      # 官方IPQ50xx配置文件的URL（从ImmortalWrt官方仓库获取）
+      IPQ50XX_CONFIG_URL: "https://raw.githubusercontent.com/immortalwrt/immortalwrt/main/target/linux/qualcommax/ipq50xx/image/Makefile"
+      TARGET_PATH: "target/linux/qualcommax/ipq50xx/image"
 
     steps:
       - name: Checkout code
@@ -19,11 +22,29 @@ jobs:
 
       - name: Free up disk space
         run: |
-          # 保留磁盘清理（避免空间不足）
           sudo apt-get autoremove -y && sudo apt-get clean -y
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
           mkdir -p $CACHE_DIR && ln -s $CACHE_DIR dl
+
+      - name: 🔧 手动下载IPQ50xx配置文件（关键修复）
+        run: |
+          # 创建目标目录（若不存在）
+          mkdir -p $TARGET_PATH
+          
+          # 从官方仓库下载缺失的Makefile
+          echo "从官方仓库下载IPQ50xx配置文件..."
+          wget -O "$TARGET_PATH/Makefile" $IPQ50XX_CONFIG_URL
+          
+          # 验证文件是否下载成功
+          if [ ! -f "$TARGET_PATH/Makefile" ]; then
+            echo "ERROR: 下载配置文件失败，请检查URL是否有效！"
+            exit 1
+          else
+            echo "✅ 成功补充IPQ50xx镜像配置文件"
+            # 显示文件内容前几行，确认正确
+            head -n 5 "$TARGET_PATH/Makefile"
+          fi
 
       - name: Initialize environment
         run: |
@@ -33,57 +54,29 @@ jobs:
       - name: Configure firmware (Enable TUN)
         run: |
           make defconfig
-          # 核心TUN配置
+          # 启用TUN支持
           echo "CONFIG_KERNEL_TUN=y" >> .config
           echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
           echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
           # 禁用冗余功能
           echo "# CONFIG_PACKAGE_luci is not set" >> .config
-          echo "# CONFIG_PACKAGE_emortal_autosamba is not set" >> .config
           make defconfig
 
-      - name: Compile core components (No verbose)
+      - name: Compile core components
         run: |
-          # 核心编译（无详细日志，节省空间）
           make -j$(nproc) 2>&1 | tee -a compile-error.log
 
-      - name: Verify image config (Critical check)
+      - name: Generate firmware (with debug log)
         run: |
-          # 验证固件生成必需的配置文件是否存在（IPQ50xx关键）
-          echo "=== 检查IPQ50xx镜像配置文件 ==="
-          IMAGE_CONFIG="target/linux/qualcommax/ipq50xx/image/Makefile"
-          if [ ! -f "$IMAGE_CONFIG" ]; then
-            echo "ERROR: 镜像配置文件缺失！$IMAGE_CONFIG"
-            exit 1
-          else
-            echo "✅ 镜像配置文件存在"
-            # 显示设备列表，确认Redmi AX3000在支持列表中
-            grep "DEVICE_" $IMAGE_CONFIG | grep "redmi"
-          fi
-
-          # 验证固件生成工具是否存在
-          echo -e "\n=== 检查固件生成工具 ==="
-          if ! command -v mkimage &> /dev/null; then
-            echo "ERROR: mkimage工具缺失（固件生成必需）"
-            exit 1
-          else
-            echo "✅ mkimage工具已安装"
-          fi
-
-      - name: Generate firmware (Enable verbose log - Critical!)
-        run: |
-          # 仅在固件生成阶段启用详细日志，定位失败原因
-          echo "=== 开始生成固件（详细日志） ==="
           make image -j1 V=s 2>&1 | tee image-build.log
-          # -j1：单线程编译，避免日志混乱；V=s：输出详细错误
 
-      - name: Upload logs and firmware (if exists)
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: debug-logs-and-firmware
+          name: redmi-ax3000-firmware
           path: |
             bin/targets/qualcommax/ipq50xx/*.bin
             bin/targets/qualcommax/ipq50xx/*.ubi
             compile-error.log
-            image-build.log  # 上传详细的固件生成日志
+            image-build.log
           retention-days: 30
