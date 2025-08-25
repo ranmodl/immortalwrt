@@ -1,4 +1,4 @@
-name: Build Redmi AX3000 with TUN (Space Optimized)
+name: Build Redmi AX3000 with TUN (Debug Image Stage)
 
 on:
   workflow_dispatch:
@@ -8,9 +8,6 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     env:
-      # 关闭详细日志，减少磁盘占用（关键优化）
-      VERBOSE: "0"
-      # 启用缓存（可选，避免重复下载）
       CACHE_DIR: "/home/runner/.cache/immortalwrt"
 
     steps:
@@ -18,68 +15,75 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
-          # 只拉取最新 commit，减少历史文件占用
           fetch-depth: 1
 
-      - name: Free up disk space (Critical!)
+      - name: Free up disk space
         run: |
-          # 1. 删除 Ubuntu 预装的冗余软件（释放 20-30GB）
-          sudo apt-get autoremove -y
-          sudo apt-get clean -y
+          # 保留磁盘清理（避免空间不足）
+          sudo apt-get autoremove -y && sudo apt-get clean -y
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
-          
-          # 2. 创建缓存目录，避免重复下载
-          mkdir -p $CACHE_DIR
-          ln -s $CACHE_DIR dl  # 软链接到编译系统的下载目录
+          mkdir -p $CACHE_DIR && ln -s $CACHE_DIR dl
 
-      - name: Initialize environment (Minimal Dependencies)
+      - name: Initialize environment
         run: |
-          # 使用仓库脚本安装依赖，但跳过冗余组件
           sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-          
-          # 更新 feeds 时关闭详细输出
-          ./scripts/feeds update -a -q
-          ./scripts/feeds install -a -q
+          ./scripts/feeds update -a -q && ./scripts/feeds install -a -q
 
-      - name: Configure firmware (Enable TUN + Minimal Options)
+      - name: Configure firmware (Enable TUN)
         run: |
-          # 1. 加载默认设备配置
           make defconfig
-          
-          # 2. 启用 TUN 核心支持（仅保留必要配置）
+          # 核心TUN配置
           echo "CONFIG_KERNEL_TUN=y" >> .config
           echo "CONFIG_KERNEL_TUN_VNET_CROSS_LE=y" >> .config
           echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
-          
-          # 3. 关闭冗余功能，减少编译文件（关键优化）
-          echo "# CONFIG_PACKAGE_luci is not set" >> .config  # 若不需要 LuCI 网页管理，关闭可省 10+GB
+          # 禁用冗余功能
+          echo "# CONFIG_PACKAGE_luci is not set" >> .config
           echo "# CONFIG_PACKAGE_emortal_autosamba is not set" >> .config
-          echo "# CONFIG_PACKAGE_pcat-manager is not set" >> .config
-          echo "CONFIG_CCACHE=y" >> .config  # 启用编译缓存，减少重复编译
-          
-          # 4. 生成最终配置
           make defconfig
 
-      - name: Start compilation (No Verbose Log)
+      - name: Compile core components (No verbose)
         run: |
-          # 1. 禁用详细日志（仅输出错误信息，减少日志文件大小）
-          make -j$(nproc) 2>&1 | tee -a build-error.log  # 只记录错误日志
-          
-          # 2. 编译完成后清理中间文件（释放空间用于生成固件）
-          make clean && rm -rf build_dir/tmp/*
+          # 核心编译（无详细日志，节省空间）
+          make -j$(nproc) 2>&1 | tee -a compile-error.log
 
-      - name: Generate final firmware
+      - name: Verify image config (Critical check)
         run: |
-          # 生成固件时禁用冗余格式（仅保留 sysupgrade 和 factory 两种核心格式）
-          make image -j$(nproc) 2>&1 | tee -a firmware-gen.log
+          # 验证固件生成必需的配置文件是否存在（IPQ50xx关键）
+          echo "=== 检查IPQ50xx镜像配置文件 ==="
+          IMAGE_CONFIG="target/linux/qualcommax/ipq50xx/image/Makefile"
+          if [ ! -f "$IMAGE_CONFIG" ]; then
+            echo "ERROR: 镜像配置文件缺失！$IMAGE_CONFIG"
+            exit 1
+          else
+            echo "✅ 镜像配置文件存在"
+            # 显示设备列表，确认Redmi AX3000在支持列表中
+            grep "DEVICE_" $IMAGE_CONFIG | grep "redmi"
+          fi
 
-      - name: Upload firmware and logs
+          # 验证固件生成工具是否存在
+          echo -e "\n=== 检查固件生成工具 ==="
+          if ! command -v mkimage &> /dev/null; then
+            echo "ERROR: mkimage工具缺失（固件生成必需）"
+            exit 1
+          else
+            echo "✅ mkimage工具已安装"
+          fi
+
+      - name: Generate firmware (Enable verbose log - Critical!)
+        run: |
+          # 仅在固件生成阶段启用详细日志，定位失败原因
+          echo "=== 开始生成固件（详细日志） ==="
+          make image -j1 V=s 2>&1 | tee image-build.log
+          # -j1：单线程编译，避免日志混乱；V=s：输出详细错误
+
+      - name: Upload logs and firmware (if exists)
         uses: actions/upload-artifact@v4
         with:
-          name: redmi-ax3000-tun-firmware
+          name: debug-logs-and-firmware
           path: |
             bin/targets/qualcommax/ipq50xx/*.bin
             bin/targets/qualcommax/ipq50xx/*.ubi
-            build-error.log  # 仅上传错误日志，避免占用空间
+            compile-error.log
+            image-build.log  # 上传详细的固件生成日志
           retention-days: 30
